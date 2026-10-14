@@ -10,6 +10,9 @@ Features:
   - Persistent config (config.json) — API key, model, workspace
   - Threading so the UI never freezes while the AI is working
   - PyInstaller-compatible path resolution via sys._MEIPASS
+  - Universal Ctrl+C / Ctrl+V / Ctrl+A / Ctrl+X / Ctrl+Z support for both Thai & English
+  - Right-click context menu (Cut / Copy / Paste / Select All)
+  - Native Thai & English typography using Leelawadee UI font
 """
 
 from __future__ import annotations
@@ -63,6 +66,10 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.j
 
 DEFAULT_MODELS = ["gemini-4-argon", "gemini-2.5-pro", "gemini-2.5-flash"]
 DEFAULT_WORKSPACE = r"D:\For AI" if os.path.isdir(r"D:\For AI") else os.path.expanduser("~")
+
+# Font configuration — optimized for Windows Thai + English UI
+FONT_FAMILY = "Leelawadee UI"  # Windows standard modern Thai font (prevents diacritic overlap)
+FONT_CODE   = "Consolas"
 
 # Colour palette
 C_BG          = "#0d1117"
@@ -163,12 +170,228 @@ class App(ctk.CTk):
         # ── Build UI ─────────────────────────────────────────────────────
         self._build_layout()
         self._load_ui_values()
+        self._setup_universal_shortcuts()
 
         # ── Start UI update loop ─────────────────────────────────────────
         self.after(50, self._process_ui_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         logger.info("Application started")
+
+    # ────────────────────────────────────────────────────────────────────
+    # Universal Keyboard Shortcuts & Context Menus
+    # ────────────────────────────────────────────────────────────────────
+
+    def _setup_universal_shortcuts(self) -> None:
+        """
+        Global handler for Ctrl+C, Ctrl+V, Ctrl+A, Ctrl+X, Ctrl+Z that uses
+        physical virtual key codes (event.keycode) so shortcuts work seamlessly
+        regardless of whether keyboard layout is in English or Thai!
+        """
+        self.bind_all("<KeyPress>", self._on_universal_keypress, add="+")
+
+    def _on_universal_keypress(self, event: tk.Event) -> str | None:
+        # Check if Ctrl key is pressed (mask 4 or 0x0004 on Windows)
+        if not (event.state & 4):
+            return None
+
+        # Virtual keycodes on Windows:
+        # 65 = A, 67 = C, 86 = V, 88 = X, 90 = Z
+        code = event.keycode
+        keysym = (event.keysym or "").lower()
+
+        is_a = (code == 65) or (keysym == "a")
+        is_c = (code == 67) or (keysym == "c")
+        is_v = (code == 86) or (keysym == "v")
+        is_x = (code == 88) or (keysym == "x")
+        is_z = (code == 90) or (keysym == "z")
+
+        if not (is_a or is_c or is_v or is_x or is_z):
+            return None
+
+        widget = event.widget
+        # If widget is inside CTkEntry or CTkTextbox, resolve the native widget
+        if hasattr(widget, "_entry"):
+            widget = widget._entry
+        elif hasattr(widget, "_textbox"):
+            widget = widget._textbox
+
+        if isinstance(widget, tk.Entry):
+            if is_a:
+                widget.selection_range(0, tk.END)
+                widget.icursor(tk.END)
+                return "break"
+            elif is_c:
+                if widget.selection_present():
+                    try:
+                        text = widget.selection_get()
+                        self.clipboard_clear()
+                        self.clipboard_append(text)
+                    except Exception:
+                        pass
+                return "break"
+            elif is_v:
+                try:
+                    text = self.clipboard_get()
+                    if text:
+                        if widget.selection_present():
+                            widget.delete("sel.first", "sel.last")
+                        widget.insert(tk.INSERT, text)
+                except Exception:
+                    pass
+                return "break"
+            elif is_x:
+                if widget.selection_present():
+                    try:
+                        text = widget.selection_get()
+                        self.clipboard_clear()
+                        self.clipboard_append(text)
+                        widget.delete("sel.first", "sel.last")
+                    except Exception:
+                        pass
+                return "break"
+
+        elif isinstance(widget, tk.Text):
+            if is_a:
+                widget.tag_add("sel", "1.0", "end-1c")
+                widget.mark_set("insert", "end-1c")
+                return "break"
+            elif is_c:
+                if widget.tag_ranges("sel"):
+                    try:
+                        text = widget.get("sel.first", "sel.last")
+                        self.clipboard_clear()
+                        self.clipboard_append(text)
+                    except Exception:
+                        pass
+                return "break"
+            elif is_v:
+                state = str(widget.cget("state"))
+                if state != "disabled":
+                    try:
+                        text = self.clipboard_get()
+                        if text:
+                            if widget.tag_ranges("sel"):
+                                widget.delete("sel.first", "sel.last")
+                            widget.insert("insert", text)
+                    except Exception:
+                        pass
+                return "break"
+            elif is_x:
+                state = str(widget.cget("state"))
+                if state != "disabled" and widget.tag_ranges("sel"):
+                    try:
+                        text = widget.get("sel.first", "sel.last")
+                        self.clipboard_clear()
+                        self.clipboard_append(text)
+                        widget.delete("sel.first", "sel.last")
+                    except Exception:
+                        pass
+                return "break"
+            elif is_z:
+                try:
+                    widget.edit_undo()
+                except Exception:
+                    pass
+                return "break"
+
+        return None
+
+    def _attach_context_menu(self, widget: tk.Widget) -> None:
+        """Attach a modern Right-Click Context Menu (Cut / Copy / Paste / Select All)."""
+        target = widget
+        if hasattr(widget, "_entry"):
+            target = widget._entry
+        elif hasattr(widget, "_textbox"):
+            target = widget._textbox
+
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg=C_CARD,
+            fg=C_TEXT,
+            activebackground=C_ACCENT2,
+            activeforeground="#ffffff",
+            activeborderwidth=0,
+            bd=1,
+            font=(FONT_FAMILY, 10),
+        )
+
+        def do_cut():
+            if isinstance(target, tk.Entry):
+                if target.selection_present():
+                    try:
+                        text = target.selection_get()
+                        self.clipboard_clear()
+                        self.clipboard_append(text)
+                        target.delete("sel.first", "sel.last")
+                    except Exception:
+                        pass
+            elif isinstance(target, tk.Text):
+                if target.tag_ranges("sel"):
+                    try:
+                        text = target.get("sel.first", "sel.last")
+                        self.clipboard_clear()
+                        self.clipboard_append(text)
+                        if str(target.cget("state")) != "disabled":
+                            target.delete("sel.first", "sel.last")
+                    except Exception:
+                        pass
+
+        def do_copy():
+            try:
+                text = ""
+                if isinstance(target, tk.Entry):
+                    if target.selection_present():
+                        text = target.selection_get()
+                elif isinstance(target, tk.Text):
+                    if target.tag_ranges("sel"):
+                        text = target.get("sel.first", "sel.last")
+                if text:
+                    self.clipboard_clear()
+                    self.clipboard_append(text)
+            except Exception:
+                pass
+
+        def do_paste():
+            try:
+                text = self.clipboard_get()
+                if not text:
+                    return
+                if isinstance(target, tk.Entry):
+                    if target.selection_present():
+                        target.delete("sel.first", "sel.last")
+                    target.insert(tk.INSERT, text)
+                elif isinstance(target, tk.Text):
+                    if str(target.cget("state")) != "disabled":
+                        if target.tag_ranges("sel"):
+                            target.delete("sel.first", "sel.last")
+                        target.insert("insert", text)
+            except Exception:
+                pass
+
+        def do_select_all():
+            if isinstance(target, tk.Entry):
+                target.selection_range(0, tk.END)
+                target.icursor(tk.END)
+            elif isinstance(target, tk.Text):
+                target.tag_add("sel", "1.0", "end-1c")
+
+        menu.add_command(label="✂️  Cut (ตัด)", command=do_cut)
+        menu.add_command(label="📋  Copy (คัดลอก)", command=do_copy)
+        menu.add_command(label="📥  Paste (วาง)", command=do_paste)
+        menu.add_separator()
+        menu.add_command(label="🔲  Select All (เลือกทั้งหมด)", command=do_select_all)
+
+        def popup(event):
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+
+        target.bind("<Button-3>", popup, add="+")
+        if target is not widget:
+            widget.bind("<Button-3>", popup, add="+")
 
     # ────────────────────────────────────────────────────────────────────
     # Layout construction
@@ -186,7 +409,7 @@ class App(ctk.CTk):
     # ── Sidebar ──────────────────────────────────────────────────────────
 
     def _build_sidebar(self) -> None:
-        sidebar = ctk.CTkFrame(self, fg_color=C_SIDEBAR, corner_radius=0, width=300)
+        sidebar = ctk.CTkFrame(self, fg_color=C_SIDEBAR, corner_radius=0, width=310)
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
         sidebar.grid_rowconfigure(10, weight=1)  # spacer pushes footer down
@@ -195,7 +418,7 @@ class App(ctk.CTk):
         hdr = ctk.CTkLabel(
             sidebar,
             text="⚙️  Settings",
-            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
             text_color=C_TEXT,
         )
         hdr.grid(row=0, column=0, columnspan=2, padx=20, pady=(20, 4), sticky="w")
@@ -205,10 +428,14 @@ class App(ctk.CTk):
         )
 
         # ── API Key ──────────────────────────────────────────────────────
-        ctk.CTkLabel(sidebar, text="Gemini API Key", text_color=C_TEXT_DIM,
-                     font=ctk.CTkFont(size=12)).grid(
-            row=2, column=0, columnspan=2, padx=20, pady=(0, 4), sticky="w"
-        )
+        # Note: We omit placeholder_text because in CTkEntry it clashes with show="•",
+        # causing overlapping font glyphs. A clear label gives a much cleaner UX.
+        ctk.CTkLabel(
+            sidebar,
+            text="Gemini API Key (เช่น AIza...)",
+            text_color=C_TEXT_DIM,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        ).grid(row=2, column=0, columnspan=2, padx=20, pady=(0, 4), sticky="w")
 
         key_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
         key_frame.grid(row=3, column=0, columnspan=2, padx=16, pady=(0, 12), sticky="ew")
@@ -218,14 +445,14 @@ class App(ctk.CTk):
         self.api_key_entry = ctk.CTkEntry(
             key_frame,
             textvariable=self.api_key_var,
-            placeholder_text="AIza...",
             show="•",
             fg_color=C_CARD,
             border_color=C_BORDER,
             text_color=C_TEXT,
-            font=ctk.CTkFont(family="Consolas", size=12),
+            font=ctk.CTkFont(family=FONT_CODE, size=12),
         )
         self.api_key_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self._attach_context_menu(self.api_key_entry)
 
         self.eye_btn = ctk.CTkButton(
             key_frame, text="👁", width=36, fg_color=C_CARD,
@@ -237,15 +464,15 @@ class App(ctk.CTk):
         ctk.CTkButton(
             sidebar, text="💾  Save API Key", fg_color=C_ACCENT,
             hover_color=C_ACCENT_HVR, text_color="white",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
             command=self._save_api_key,
         ).grid(row=4, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew")
 
         # ── Model Selector ───────────────────────────────────────────────
-        ctk.CTkLabel(sidebar, text="Model", text_color=C_TEXT_DIM,
-                     font=ctk.CTkFont(size=12)).grid(
-            row=5, column=0, columnspan=2, padx=20, pady=(0, 4), sticky="w"
-        )
+        ctk.CTkLabel(
+            sidebar, text="Model (เลือกหรือพิมพ์เอง)", text_color=C_TEXT_DIM,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        ).grid(row=5, column=0, columnspan=2, padx=20, pady=(0, 4), sticky="w")
 
         self.model_var = tk.StringVar()
         self.model_combo = ctk.CTkComboBox(
@@ -259,16 +486,16 @@ class App(ctk.CTk):
             dropdown_text_color=C_TEXT,
             button_color=C_ACCENT2,
             button_hover_color=C_ACCENT2_HVR,
-            font=ctk.CTkFont(family="Consolas", size=12),
+            font=ctk.CTkFont(family=FONT_CODE, size=12),
             command=self._on_model_change,
         )
         self.model_combo.grid(row=6, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew")
 
         # ── Workspace Folder ─────────────────────────────────────────────
-        ctk.CTkLabel(sidebar, text="Workspace Folder", text_color=C_TEXT_DIM,
-                     font=ctk.CTkFont(size=12)).grid(
-            row=7, column=0, columnspan=2, padx=20, pady=(0, 4), sticky="w"
-        )
+        ctk.CTkLabel(
+            sidebar, text="Workspace Folder (โฟลเดอร์ทำงาน)", text_color=C_TEXT_DIM,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        ).grid(row=7, column=0, columnspan=2, padx=20, pady=(0, 4), sticky="w")
 
         self.workspace_var = tk.StringVar()
         self.workspace_entry = ctk.CTkEntry(
@@ -277,14 +504,15 @@ class App(ctk.CTk):
             fg_color=C_CARD,
             border_color=C_BORDER,
             text_color=C_TEXT,
-            font=ctk.CTkFont(family="Consolas", size=11),
+            font=ctk.CTkFont(family=FONT_CODE, size=11),
         )
         self.workspace_entry.grid(row=8, column=0, columnspan=2, padx=16, pady=(0, 6), sticky="ew")
+        self._attach_context_menu(self.workspace_entry)
 
         ctk.CTkButton(
             sidebar, text="📂  Browse Folder", fg_color=C_ACCENT2,
             hover_color=C_ACCENT2_HVR, text_color="white",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
             command=self._browse_workspace,
         ).grid(row=9, column=0, columnspan=2, padx=16, pady=(0, 20), sticky="ew")
 
@@ -299,7 +527,7 @@ class App(ctk.CTk):
             sidebar,
             text="Local AI Coding Agent  v1.0\nPowered by Google Gemini",
             text_color=C_TEXT_DIM,
-            font=ctk.CTkFont(size=10),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
             justify="center",
         ).grid(row=12, column=0, columnspan=2, padx=16, pady=(0, 12))
 
@@ -320,14 +548,15 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             topbar,
             text=APP_TITLE,
-            font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold"),
             text_color=C_TEXT,
         ).grid(row=0, column=0, padx=20, pady=14, sticky="w")
 
         ctk.CTkButton(
             topbar, text="🗑  Clear Chat", width=120,
             fg_color=C_DANGER, hover_color=C_DANGER_HVR,
-            text_color="white", font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="white",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             command=self._clear_chat,
         ).grid(row=0, column=1, padx=12, pady=10)
 
@@ -343,13 +572,14 @@ class App(ctk.CTk):
         self._msg_row = 0
 
         # ── Status bar ────────────────────────────────────────────────────
-        self.status_var = tk.StringVar(value="✅ Ready — type a message and press Enter or click Send")
+        self.status_var = tk.StringVar(value="✅ Ready — พร้อมรับคำสั่ง พิมพ์ข้อความแล้วกด Enter หรือ Send ได้เลย")
         status_bar = ctk.CTkFrame(chat_frame, fg_color=C_SIDEBAR, corner_radius=0, height=28)
         status_bar.grid(row=2, column=0, sticky="ew")
         status_bar.grid_propagate(False)
         ctk.CTkLabel(
             status_bar, textvariable=self.status_var,
-            text_color=C_TEXT_DIM, font=ctk.CTkFont(size=11),
+            text_color=C_TEXT_DIM,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
         ).grid(row=0, column=0, padx=12, pady=4, sticky="w")
 
         # ── Input area ────────────────────────────────────────────────────
@@ -364,12 +594,13 @@ class App(ctk.CTk):
             border_color=C_BORDER,
             border_width=1,
             text_color=C_TEXT,
-            font=ctk.CTkFont(family="Segoe UI", size=13),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13),
             wrap="word",
         )
         self.input_box.grid(row=0, column=0, padx=(16, 8), pady=12, sticky="ew")
         self.input_box.bind("<Return>", self._on_enter_key)
         self.input_box.bind("<Shift-Return>", lambda e: None)  # allow newlines with Shift+Enter
+        self._attach_context_menu(self.input_box)
 
         self.send_btn = ctk.CTkButton(
             input_frame,
@@ -378,15 +609,16 @@ class App(ctk.CTk):
             fg_color=C_ACCENT,
             hover_color=C_ACCENT_HVR,
             text_color="white",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
             command=self._on_send,
         )
         self.send_btn.grid(row=0, column=1, padx=(0, 16), pady=12)
 
         # ── Welcome message ───────────────────────────────────────────────
         self._add_system_message(
-            "👋  ยินดีต้อนรับ!  ตั้งค่า **API Key** และ **Workspace Folder** ในแถบซ้าย แล้วเริ่มพูดคุยกับ AI Agent ได้เลย\n\n"
-            "ตัวอย่างคำสั่ง:\n"
+            "👋  ยินดีต้อนรับสู่ Local AI Coding Agent!\n"
+            "ตั้งค่า API Key และเลือก Workspace Folder ในแถบซ้าย แล้วเริ่มพูดคุยกับ AI Agent ได้เลย\n\n"
+            "คำสั่งตัวอย่าง:\n"
             "• `สร้างเว็บแอป Flask อย่างง่ายใน workspace`\n"
             "• `อ่านไฟล์ main.py แล้วอธิบายให้ฉันฟัง`\n"
             "• `รัน pip install requests แล้วแจ้งผลให้ฉันทราบ`"
@@ -428,7 +660,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             outer, text=label_text,
             text_color=label_color,
-            font=ctk.CTkFont(size=11, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
         ).grid(row=0, column=0, sticky="w", padx=4)
 
         # Bubble
@@ -448,10 +680,10 @@ class App(ctk.CTk):
 
     def _render_message_content(self, parent: ctk.CTkFrame, text: str) -> None:
         """
-        Render markdown-ish text with code block detection.
-        Code blocks (```...```) are rendered with a monospace font on a dark background.
+        Render text with code block detection.
+        Text uses Leelawadee UI so Thai and English are crystal clear.
+        Code blocks (```...```) are rendered in selectable monospace textboxes.
         """
-        # Split on triple-backtick code fences
         parts = re.split(r"(```[\s\S]*?```)", text)
         row = 0
         for part in parts:
@@ -472,7 +704,7 @@ class App(ctk.CTk):
                     code_frame,
                     fg_color=C_CODE_BG,
                     text_color="#79c0ff",
-                    font=ctk.CTkFont(family="Consolas", size=12),
+                    font=ctk.CTkFont(family=FONT_CODE, size=12),
                     wrap="none",
                     activate_scrollbars=True,
                     border_width=0,
@@ -481,13 +713,14 @@ class App(ctk.CTk):
                 code_label.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
                 code_label.insert("1.0", code_body.strip())
                 code_label.configure(state="disabled")
+                self._attach_context_menu(code_label)
             else:
                 if part.strip():
                     txt_label = ctk.CTkLabel(
                         parent,
                         text=part.strip(),
                         text_color=C_TEXT,
-                        font=ctk.CTkFont(family="Segoe UI", size=13),
+                        font=ctk.CTkFont(family=FONT_FAMILY, size=13),
                         wraplength=720,
                         justify="left",
                         anchor="w",
@@ -506,7 +739,7 @@ class App(ctk.CTk):
             frame,
             text=text,
             text_color=C_TEXT_DIM,
-            font=ctk.CTkFont(family="Segoe UI", size=12),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
             wraplength=700,
             justify="left",
         ).grid(row=0, column=0, sticky="ew", padx=16, pady=12)
@@ -534,7 +767,7 @@ class App(ctk.CTk):
             indicator,
             text=label_text,
             text_color="#3fb950",
-            font=ctk.CTkFont(family="Consolas", size=11),
+            font=ctk.CTkFont(family=FONT_CODE, size=11),
         ).grid(row=0, column=0, sticky="w", padx=10, pady=4)
 
         self._scroll_to_bottom()
@@ -576,7 +809,9 @@ class App(ctk.CTk):
 
     def _toggle_api_key_visibility(self) -> None:
         self.show_api_key = not self.show_api_key
+        # Update masked state and eye icon
         self.api_key_entry.configure(show="" if self.show_api_key else "•")
+        self.eye_btn.configure(text="🙈" if self.show_api_key else "👁")
 
     def _save_api_key(self) -> None:
         key = self.api_key_var.get().strip()
@@ -590,14 +825,14 @@ class App(ctk.CTk):
         tools.set_workspace(self.config_data["workspace"])
         # Reset chat session so new key/model is picked up
         self.chat_session = None
-        self.status_var.set("✅ API Key saved. Chat session reset — ready.")
-        self._add_system_message("✅ API Key saved successfully. New chat session started.")
+        self.status_var.set("✅ บันทึก API Key สำเร็จ — เริ่มบทสนทนาใหม่พร้อมใช้งาน")
+        self._add_system_message("✅ บันทึก API Key เรียบร้อยแล้ว เริ่มต้นบทสนทนาใหม่พร้อมใช้งาน")
         logger.info("API key saved and chat session reset.")
 
     def _on_model_change(self, choice: str) -> None:
         self.config_data["model"] = choice
         self.chat_session = None
-        self.status_var.set(f"Model changed to {choice} — chat session reset.")
+        self.status_var.set(f"เปลี่ยนโมเดลเป็น {choice} — เริ่มบทสนทนาใหม่")
 
     def _browse_workspace(self) -> None:
         current = self.workspace_var.get() or DEFAULT_WORKSPACE
@@ -607,8 +842,8 @@ class App(ctk.CTk):
             self.config_data["workspace"] = folder
             tools.set_workspace(folder)
             save_config(self.config_data)
-            self.status_var.set(f"Workspace set to: {folder}")
-            self._add_system_message(f"📁 Workspace folder set to:\n`{folder}`")
+            self.status_var.set(f"Workspace: {folder}")
+            self._add_system_message(f"📁 ตั้งค่า Workspace ไปที่:\n`{folder}`")
 
     # ────────────────────────────────────────────────────────────────────
     # Chat input / send
@@ -635,15 +870,15 @@ class App(ctk.CTk):
 
     def _clear_chat(self) -> None:
         if self.is_thinking:
-            messagebox.showinfo("Busy", "Please wait for the AI to finish before clearing.")
+            messagebox.showinfo("Busy", "กรุณารอ AI ทำงานเสร็จก่อนล้างแชท")
             return
         # Destroy all message widgets
         for widget in self.messages_frame.winfo_children():
             widget.destroy()
         self._msg_row = 0
         self.chat_session = None
-        self._add_system_message("🗑  Chat cleared. New session started.")
-        self.status_var.set("✅ Chat cleared — ready.")
+        self._add_system_message("🗑  ล้างบทสนทนาเรียบร้อย เริ่มต้นเซสชันใหม่")
+        self.status_var.set("✅ ล้างบทสนทนาเรียบร้อย — พร้อมรับคำสั่ง")
 
     # ────────────────────────────────────────────────────────────────────
     # UI state helpers
