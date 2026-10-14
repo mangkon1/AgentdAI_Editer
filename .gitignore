@@ -19,6 +19,10 @@ dist/
 # ── Application data / secrets ─────────────────────────────────
 config.json
 app.log
+chats/
+chat_history.json
+chat_history.json.migrated
+sync_backlog.json
 *.log
 
 # ── OS artifacts ───────────────────────────────────────────────

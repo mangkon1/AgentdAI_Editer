@@ -51,6 +51,8 @@ jobs:
             --hidden-import google.genai `
             --hidden-import google.genai.types `
             --hidden-import customtkinter `
+            --hidden-import firebase_sync `
+            --hidden-import conversation_store `
             main.py
 
       # ── 5. Verify the output exists ────────────────────────────────────

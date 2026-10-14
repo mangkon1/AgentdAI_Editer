@@ -4,7 +4,9 @@ main.py
 Local AI Coding Agent — Desktop GUI powered by Google Gemini + customtkinter.
 
 Features:
-  - Full-width modern dark-mode chat interface
+  - Grok-style layout: left conversation sidebar + centered chat with pill header
+  - Multi-conversation history (chats/<id>.json + chats/index.json offline cache)
+  - Automatic realtime sync to Firebase Cloud Firestore (firebase_sync.py)
   - Modal Settings Popup (CTkToplevel) for API Key, Model, and Workspace
   - Persistent config.json (properly resolved for both dev & PyInstaller .exe)
   - Persistent Chat History (chat_history.json) — resume conversations across restarts
@@ -34,6 +36,8 @@ from google import genai
 from google.genai import types as genai_types
 
 import agent_tools as tools
+import firebase_sync as fbsync
+from conversation_store import AVATAR_COLORS, ConversationStore, build_markdown
 
 # ---------------------------------------------------------------------------
 # Path resolution helpers (Bundling & Persistence Compatibility)
@@ -87,22 +91,26 @@ DEFAULT_WORKSPACE = r"D:\For AI" if os.path.isdir(r"D:\For AI") else os.path.exp
 FONT_FAMILY = "Leelawadee UI"  # Windows standard modern Thai font (prevents diacritic overlap)
 FONT_CODE   = "Consolas"
 
-# Colour palette
-C_BG          = "#0d1117"
-C_SIDEBAR     = "#161b22"
-C_CARD        = "#1c2128"
-C_ACCENT      = "#238636"
-C_ACCENT_HVR  = "#2ea043"
-C_ACCENT2     = "#1f6feb"
-C_ACCENT2_HVR = "#388bfd"
+# Colour palette — dark charcoal (Grok Bot desktop style)
+C_BG          = "#1e1e1e"
+C_SIDEBAR     = "#171717"
+C_CARD        = "#2b2b2b"
+C_SELECTED    = "#2a2a2a"
+C_HOVER       = "#242424"
+C_ACCENT      = "#ff3b8d"
+C_ACCENT_HVR  = "#ff5aa0"
+C_ACCENT2     = "#3a3a3a"
+C_ACCENT2_HVR = "#4a4a4a"
 C_DANGER      = "#da3633"
 C_DANGER_HVR  = "#f85149"
-C_TEXT        = "#e6edf3"
-C_TEXT_DIM    = "#8b949e"
-C_BORDER      = "#30363d"
-C_USER_BUBBLE = "#1f3a5f"
-C_AI_BUBBLE   = "#1c2128"
-C_CODE_BG     = "#0d1117"
+C_TEXT        = "#f2f2f2"
+C_TEXT_DIM    = "#9a9a9a"
+C_BORDER      = "#3a3a3a"
+C_USER_BUBBLE = "#3a3a3a"
+C_AI_BUBBLE   = "#2b2b2b"
+C_CODE_BG     = "#161616"
+C_OK          = "#3fb950"
+C_WARN        = "#d29922"
 
 SYSTEM_PROMPT = """You are a highly skilled Local AI Coding Agent running on the user's Windows desktop.
 You have direct access to the user's file system through built-in tools:
@@ -133,6 +141,9 @@ def load_config() -> dict:
         "api_key": "",
         "model": DEFAULT_MODELS[0],
         "workspace": DEFAULT_WORKSPACE,
+        "firebase_enabled": True,
+        "firebase_project_id": fbsync.DEFAULT_PROJECT_ID,
+        "firebase_api_key": fbsync.DEFAULT_API_KEY,
     }
     try:
         if os.path.isfile(CONFIG_FILE):
@@ -181,30 +192,52 @@ def save_chat_history(history: list[dict]) -> None:
         logger.warning("Could not save chat history: %s", exc)
 
 
-def export_chat_to_markdown(history: list[dict], target_path: str) -> None:
-    """Export the chat history into a beautifully formatted Markdown file."""
-    lines = [
-        "# 🤖 Local AI Coding Agent — Chat History\n",
-        f"*Exported on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n",
-        "---\n",
-    ]
-    for msg in history:
-        role = msg.get("role", "user")
-        time_str = msg.get("time", "")
-        content = msg.get("content", "").strip()
 
-        if role == "user":
-            lines.append(f"### 👤 User {f'({time_str})' if time_str else ''}\n")
-            lines.append(f"{content}\n\n---\n")
-        elif role == "assistant":
-            lines.append(f"### 🤖 Agent {f'({time_str})' if time_str else ''}\n")
-            lines.append(f"{content}\n\n---\n")
-        elif role == "system":
-            lines.append(f"> ℹ️ **System:** {content}\n\n---\n")
-
+def export_chat_to_markdown(history: list[dict], target_path: str, title: str | None = None) -> None:
+    """Export a conversation into a Markdown file (same format synced to Firestore)."""
     with open(target_path, "w", encoding="utf-8") as fh:
-        fh.writelines(lines)
+        fh.write(build_markdown(history, title))
     logger.info("Exported chat history to: %s", target_path)
+
+
+def format_date_separator(ts_ms: int) -> str:
+    dt = datetime.datetime.fromtimestamp(ts_ms / 1000) if ts_ms else datetime.datetime.now()
+    today = datetime.date.today()
+    if dt.date() == today:
+        day = "วันนี้"
+    elif dt.date() == today - datetime.timedelta(days=1):
+        day = "เมื่อวาน"
+    else:
+        day = dt.strftime("%d/%m/%Y")
+    return f"{day} {dt.strftime('%H:%M')}"
+
+
+class Tooltip:
+    """Tiny hover tooltip for any widget."""
+
+    def __init__(self, widget: tk.Widget, text: str = "") -> None:
+        self.widget = widget
+        self.text = text
+        self.tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    def _show(self, _e=None) -> None:
+        if not self.text or self.tip:
+            return
+        x = self.widget.winfo_rootx() - 120
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{max(x, 0)}+{y}")
+        tk.Label(self.tip, text=self.text, bg="#2b2b2b", fg=C_TEXT, justify="left",
+                 wraplength=380, padx=8, pady=6, font=(FONT_FAMILY, 9)).pack()
+
+    def _hide(self, _e=None) -> None:
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +253,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.show_api_key = False
 
         self.title("⚙️ การตั้งค่าระบบ (Settings)")
-        self.geometry("540x520")
+        self.geometry("540x700")
         self.resizable(False, False)
         self.configure(fg_color=C_BG)
 
@@ -238,7 +271,7 @@ class SettingsDialog(ctk.CTkToplevel):
         px = self.parent_app.winfo_x()
         py = self.parent_app.winfo_y()
         w = 540
-        h = 520
+        h = 700
         x = px + max((pw - w) // 2, 0)
         y = py + max((ph - h) // 2, 0)
         self.geometry(f"{w}x{h}+{x}+{y}")
@@ -360,7 +393,7 @@ class SettingsDialog(ctk.CTkToplevel):
         ).pack(anchor="w", padx=20, pady=(0, 4))
 
         ws_box = ctk.CTkFrame(card, fg_color="transparent")
-        ws_box.pack(fill="x", padx=20, pady=(0, 20))
+        ws_box.pack(fill="x", padx=20, pady=(0, 14))
         ws_box.columnconfigure(0, weight=1)
 
         current_ws = self.parent_app.config_data.get("workspace", DEFAULT_WORKSPACE)
@@ -389,6 +422,37 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._browse_folder,
         )
         browse_btn.grid(row=0, column=1)
+
+        # ── 4. Firebase Sync ───────────────────────────────────────────────
+        fb_hdr = ctk.CTkFrame(card, fg_color="transparent")
+        fb_hdr.pack(fill="x", padx=20, pady=(0, 4))
+        ctk.CTkLabel(
+            fb_hdr,
+            text="☁️ Firebase Cloud Firestore Sync:",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
+            text_color=C_TEXT,
+        ).pack(side="left")
+        self.fb_enabled_var = tk.BooleanVar(value=bool(self.parent_app.config_data.get("firebase_enabled", True)))
+        ctk.CTkSwitch(
+            fb_hdr, text="เปิดใช้งาน", variable=self.fb_enabled_var,
+            progress_color=C_ACCENT, text_color=C_TEXT,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+        ).pack(side="right")
+
+        fb_box = ctk.CTkFrame(card, fg_color="transparent")
+        fb_box.pack(fill="x", padx=20, pady=(0, 20))
+        fb_box.columnconfigure(1, weight=1)
+        self.fb_project_var = tk.StringVar(
+            value=self.parent_app.config_data.get("firebase_project_id") or fbsync.DEFAULT_PROJECT_ID)
+        self.fb_key_var = tk.StringVar(
+            value=self.parent_app.config_data.get("firebase_api_key") or fbsync.DEFAULT_API_KEY)
+        for r, (lbl, var) in enumerate((("Project ID", self.fb_project_var), ("Web API Key", self.fb_key_var))):
+            ctk.CTkLabel(fb_box, text=lbl, text_color=C_TEXT_DIM,
+                         font=ctk.CTkFont(family=FONT_FAMILY, size=11)).grid(row=r, column=0, sticky="w", padx=(0, 8), pady=2)
+            ent = ctk.CTkEntry(fb_box, textvariable=var, fg_color=C_CARD, border_color=C_BORDER,
+                               text_color=C_TEXT, font=ctk.CTkFont(family=FONT_CODE, size=11), height=32)
+            ent.grid(row=r, column=1, sticky="ew", pady=2)
+            self.parent_app._attach_context_menu(ent)
 
         # ── Footer / Actions ──────────────────────────────────────────────
         ctk.CTkFrame(card, height=1, fg_color=C_BORDER).pack(fill="x", padx=16, pady=(0, 16))
@@ -454,14 +518,20 @@ class SettingsDialog(ctk.CTkToplevel):
         self.parent_app.config_data["model"] = model
         self.parent_app.config_data["workspace"] = workspace
 
+        cfg = self.parent_app.config_data
+        cfg["firebase_enabled"] = bool(self.fb_enabled_var.get())
+        cfg["firebase_project_id"] = self.fb_project_var.get().strip() or fbsync.DEFAULT_PROJECT_ID
+        cfg["firebase_api_key"] = self.fb_key_var.get().strip() or fbsync.DEFAULT_API_KEY
+
         # Persist config to config.json
         save_config(self.parent_app.config_data)
+        self.parent_app.sync.restart()
 
         # Apply workspace to tool runner
         tools.set_workspace(workspace)
 
         # Reset chat session with updated credentials
-        self.parent_app.chat_session = None
+        self.parent_app.chat_sessions.clear()
 
         # Update parent topbar badges
         self.parent_app._update_topbar_badges()
@@ -487,7 +557,9 @@ class SettingsDialog(ctk.CTkToplevel):
 # ---------------------------------------------------------------------------
 
 class App(ctk.CTk):
-    """Main application window — dark-mode AI Coding Agent."""
+    """Main application window — Grok-style sidebar + chat, synced to Firestore."""
+
+    SIDEBAR_W = 260
 
     def __init__(self) -> None:
         super().__init__()
@@ -499,11 +571,24 @@ class App(ctk.CTk):
 
         # ── State ────────────────────────────────────────────────────────
         self.config_data = load_config()
-        self.chat_history: list[dict] = load_chat_history()
-        self.chat_session: genai.chats.Chat | None = None
+        self.store = ConversationStore(APP_DIR)
+        self.store.migrate_legacy(CHAT_HISTORY_FILE)
+        self.current_id: str | None = None
+        self.chat_sessions: dict[str, genai.chats.Chat] = {}
         self.is_thinking = False
+        self.thinking_conv: str | None = None
         self._ui_queue: queue.Queue = queue.Queue()   # thread → UI messages
         self._msg_row = 0
+        self._last_sep_ts = 0
+        self._conv_rows: dict[str, ctk.CTkFrame] = {}
+        self._sync_error_shown = ""
+
+        # ── Firebase sync (background worker) ───────────────────────────
+        self.sync = fbsync.SyncManager(
+            APP_DIR, self.config_data, save_config,
+            on_status=lambda s, d: self._q("sync_status", s, d),
+            on_remote=lambda remote: self._q("remote_pull", remote),
+        )
 
         # ── Window setup ─────────────────────────────────────────────────
         self.title(APP_TITLE)
@@ -517,14 +602,26 @@ class App(ctk.CTk):
         self._build_layout()
         self._setup_universal_shortcuts()
 
-        # ── Restore previous chat history or show welcome ────────────────
-        self._restore_chat_history()
+        # ── Restore conversations ───────────────────────────────────────
+        convs = self.store.list()
+        if convs:
+            self._select_conversation(convs[0]["id"])
+        else:
+            self._new_conversation()
+        self._refresh_sidebar()
 
-        # ── Start UI update loop ─────────────────────────────────────────
+        # ── Start UI update loop + sync ─────────────────────────────────
         self.after(50, self._process_ui_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.sync.start()
 
         logger.info("Application started successfully")
+
+    @property
+    def chat_history(self) -> list[dict]:
+        if not self.current_id:
+            return []
+        return self.store.get(self.current_id).get("messages", [])
 
     # ────────────────────────────────────────────────────────────────────
     # Universal Keyboard Shortcuts & Context Menus
@@ -738,267 +835,404 @@ class App(ctk.CTk):
             widget.bind("<Button-3>", popup, add="+")
 
     # ────────────────────────────────────────────────────────────────────
-    # Layout construction — Full-Width Chat with Top Navigation
+    # Layout construction — Sidebar + Chat (Grok Bot desktop style)
     # ────────────────────────────────────────────────────────────────────
 
+    def _font(self, size: int = 13, weight: str = "normal", code: bool = False) -> ctk.CTkFont:
+        return ctk.CTkFont(family=FONT_CODE if code else FONT_FAMILY, size=size, weight=weight)
+
     def _build_layout(self) -> None:
-        """Create full-width chat interface with modern top control bar."""
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=0, minsize=self.SIDEBAR_W)
+        self.grid_columnconfigure(1, weight=1)
+        self._build_sidebar()
+        self._build_main()
 
-        self._build_topbar()
-        self._build_chat_area()
+    # ── Sidebar ──────────────────────────────────────────────────────────
 
-    def _build_topbar(self) -> None:
-        """Header bar containing branding, status chips, and action buttons."""
-        topbar = ctk.CTkFrame(self, fg_color=C_SIDEBAR, corner_radius=0, height=56)
-        topbar.grid(row=0, column=0, sticky="ew")
-        topbar.grid_propagate(False)
-        topbar.columnconfigure(1, weight=1)
+    def _build_sidebar(self) -> None:
+        sb = ctk.CTkFrame(self, fg_color=C_SIDEBAR, corner_radius=0, width=self.SIDEBAR_W)
+        sb.grid(row=0, column=0, sticky="nsew")
+        sb.grid_propagate(False)
+        sb.grid_columnconfigure(0, weight=1)
+        sb.grid_rowconfigure(3, weight=1)
 
-        # ── Left: App Title ───────────────────────────────────────────────
-        title_box = ctk.CTkFrame(topbar, fg_color="transparent")
-        title_box.grid(row=0, column=0, padx=(20, 16), pady=10, sticky="w")
-
-        ctk.CTkLabel(
-            title_box,
-            text=APP_TITLE,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
-            text_color=C_TEXT,
+        # Top: round search + round new-chat buttons
+        top = ctk.CTkFrame(sb, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 4))
+        ctk.CTkButton(
+            top, text="🔍", width=38, height=38, corner_radius=19,
+            fg_color=C_CARD, hover_color=C_ACCENT2_HVR, text_color=C_TEXT,
+            font=self._font(14), command=self._toggle_search,
         ).pack(side="left")
+        ctk.CTkButton(
+            top, text="+", width=38, height=38, corner_radius=19,
+            fg_color=C_CARD, hover_color=C_ACCENT2_HVR, text_color=C_TEXT,
+            font=self._font(20, "bold"), command=self._new_conversation,
+        ).pack(side="right")
 
-        # ── Middle: Info Badges ───────────────────────────────────────────
-        self.badges_frame = ctk.CTkFrame(topbar, fg_color="transparent")
-        self.badges_frame.grid(row=0, column=1, padx=8, pady=10, sticky="w")
+        # App avatar / logo + name
+        brand = ctk.CTkFrame(sb, fg_color="transparent")
+        brand.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        ctk.CTkLabel(
+            brand, text="🤖", width=76, height=76, corner_radius=38,
+            fg_color=C_ACCENT, text_color="white", font=self._font(34),
+        ).pack(pady=(0, 6))
+        ctk.CTkLabel(brand, text="Local AI Agent", text_color=C_TEXT, font=self._font(16, "bold")).pack()
+        self.sidebar_model_lbl = ctk.CTkLabel(brand, text="", text_color=C_TEXT_DIM, font=self._font(11))
+        self.sidebar_model_lbl.pack()
 
-        self.model_badge = ctk.CTkLabel(
-            self.badges_frame,
-            text="",
-            fg_color=C_CARD,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_CODE, size=11),
-            text_color=C_TEXT,
-            padx=10,
-            pady=4,
+        # Search entry (hidden until 🔍 pressed)
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self._refresh_sidebar())
+        self.search_entry = ctk.CTkEntry(
+            sb, textvariable=self.search_var, placeholder_text="ค้นหาแชท...",
+            fg_color=C_CARD, border_color=C_BORDER, text_color=C_TEXT,
+            corner_radius=18, height=36, font=self._font(12),
         )
-        self.model_badge.pack(side="left", padx=(0, 8))
+        self._attach_context_menu(self.search_entry)
+        self._search_visible = False
 
-        self.ws_badge = ctk.CTkLabel(
-            self.badges_frame,
-            text="",
-            fg_color=C_CARD,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_CODE, size=11),
-            text_color=C_TEXT_DIM,
-            padx=10,
-            pady=4,
+        # Conversation list
+        self.conv_list = ctk.CTkScrollableFrame(
+            sb, fg_color=C_SIDEBAR, corner_radius=0,
+            scrollbar_button_color=C_SIDEBAR, scrollbar_button_hover_color=C_BORDER,
         )
-        self.ws_badge.pack(side="left")
+        self.conv_list.grid(row=3, column=0, sticky="nsew", padx=6, pady=(4, 4))
+        self.conv_list.grid_columnconfigure(0, weight=1)
+
+        # Bottom: settings
+        ctk.CTkButton(
+            sb, text="⚙️  ตั้งค่า (Settings)", height=40, corner_radius=20,
+            fg_color=C_CARD, hover_color=C_ACCENT2_HVR, text_color=C_TEXT,
+            font=self._font(12, "bold"), command=self._open_settings_popup,
+        ).grid(row=4, column=0, sticky="ew", padx=14, pady=14)
+
+    def _toggle_search(self) -> None:
+        self._search_visible = not self._search_visible
+        if self._search_visible:
+            self.search_entry.grid(row=2, column=0, sticky="ew", padx=14, pady=(4, 4))
+            self.search_entry.focus_set()
+        else:
+            self.search_var.set("")
+            self.search_entry.grid_forget()
+
+    def _refresh_sidebar(self) -> None:
+        for w in self.conv_list.winfo_children():
+            w.destroy()
+        self._conv_rows.clear()
+        query = self.search_var.get().strip().lower() if hasattr(self, "search_var") else ""
+        row = 0
+        for meta in self.store.list():
+            title = meta.get("title") or "แชทใหม่"
+            preview = meta.get("preview") or ""
+            if query and query not in title.lower() and query not in preview.lower():
+                continue
+            self._build_conv_row(row, meta)
+            row += 1
+        if row == 0:
+            ctk.CTkLabel(self.conv_list, text="ไม่พบแชท" if query else "ยังไม่มีแชท",
+                         text_color=C_TEXT_DIM, font=self._font(12)).grid(row=0, column=0, pady=20)
+
+    def _build_conv_row(self, row: int, meta: dict) -> None:
+        cid = meta["id"]
+        selected = cid == self.current_id
+        frame = ctk.CTkFrame(self.conv_list, fg_color=C_SELECTED if selected else "transparent",
+                             corner_radius=14, height=62)
+        frame.grid(row=row, column=0, sticky="ew", padx=2, pady=2)
+        frame.grid_columnconfigure(1, weight=1)
+        title = meta.get("title") or "แชทใหม่"
+        initial = title.strip()[:1].upper() or "?"
+        avatar = ctk.CTkLabel(frame, text=initial, width=42, height=42, corner_radius=21,
+                              fg_color=meta.get("avatarColor") or AVATAR_COLORS[0],
+                              text_color="white", font=self._font(16, "bold"))
+        avatar.grid(row=0, column=0, rowspan=2, padx=(10, 10), pady=10)
+        t_lbl = ctk.CTkLabel(frame, text=self._truncate(title, 24), anchor="w", text_color=C_TEXT,
+                             font=self._font(13, "bold"))
+        t_lbl.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(10, 0))
+        p_lbl = ctk.CTkLabel(frame, text=self._truncate(meta.get("preview") or "ยังไม่มีข้อความ", 30),
+                             anchor="w", text_color=C_TEXT_DIM, font=self._font(11))
+        p_lbl.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(0, 10))
+
+        def on_enter(_e=None):
+            if cid != self.current_id:
+                frame.configure(fg_color=C_HOVER)
+
+        def on_leave(_e=None):
+            if cid != self.current_id:
+                frame.configure(fg_color="transparent")
+
+        for w in (frame, avatar, t_lbl, p_lbl):
+            w.bind("<Button-1>", lambda _e, c=cid: self._select_conversation(c))
+            w.bind("<Button-3>", lambda e, c=cid: self._conv_context_menu(e, c))
+            w.bind("<Enter>", on_enter, add="+")
+            w.bind("<Leave>", on_leave, add="+")
+        self._conv_rows[cid] = frame
+
+    @staticmethod
+    def _truncate(text: str, n: int) -> str:
+        text = " ".join(str(text).split())
+        return text if len(text) <= n else text[: n - 1] + "…"
+
+    def _conv_context_menu(self, event: tk.Event, conv_id: str) -> None:
+        menu = tk.Menu(self, tearoff=0, bg=C_CARD, fg=C_TEXT, activebackground=C_ACCENT,
+                       activeforeground="#ffffff", bd=1, font=(FONT_FAMILY, 10))
+        menu.add_command(label="✏️  เปลี่ยนชื่อ (Rename)", command=lambda: self._rename_conversation(conv_id))
+        menu.add_command(label="📄  ส่งออก Markdown", command=lambda: self._export_markdown(conv_id))
+        menu.add_separator()
+        menu.add_command(label="🗑  ลบแชท (Delete)", command=lambda: self._delete_conversation(conv_id))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    # ── Main area ────────────────────────────────────────────────────────
+
+    def _build_main(self) -> None:
+        main = ctk.CTkFrame(self, fg_color=C_BG, corner_radius=0)
+        main.grid(row=0, column=1, sticky="nsew")
+        main.grid_rowconfigure(1, weight=1)
+        main.grid_columnconfigure(0, weight=1)
+
+        # Header: model badge (left) · pill with avatar+name (center) · sync + export (right)
+        header = ctk.CTkFrame(main, fg_color=C_BG, corner_radius=0, height=64)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_propagate(False)
+
+        self.model_badge = ctk.CTkLabel(header, text="", fg_color=C_CARD, corner_radius=12,
+                                        text_color=C_TEXT_DIM, font=self._font(11, code=True), padx=10, pady=4)
+        self.model_badge.place(x=16, rely=0.5, anchor="w")
+        self.ws_badge = self.model_badge  # backwards compat for _update_topbar_badges
+
+        pill = ctk.CTkFrame(header, fg_color=C_SELECTED, corner_radius=22, height=44)
+        pill.place(relx=0.5, rely=0.5, anchor="center")
+        self.header_avatar = ctk.CTkLabel(pill, text="", width=30, height=30, corner_radius=15,
+                                          fg_color=AVATAR_COLORS[0], text_color="white", font=self._font(13, "bold"))
+        self.header_avatar.pack(side="left", padx=(8, 8), pady=7)
+        self.header_title = ctk.CTkLabel(pill, text="", text_color=C_TEXT, font=self._font(14, "bold"))
+        self.header_title.pack(side="left", padx=(0, 16))
+
+        right = ctk.CTkFrame(header, fg_color="transparent")
+        right.place(relx=1.0, x=-16, rely=0.5, anchor="e")
+        self.sync_lbl = ctk.CTkLabel(right, text="", text_color=C_TEXT_DIM, font=self._font(11))
+        self.sync_lbl.pack(side="left", padx=(0, 10))
+        self.sync_tip = Tooltip(self.sync_lbl, "")
+        ctk.CTkButton(
+            right, text="📄 ส่งออก Markdown", width=130, height=32, corner_radius=16,
+            fg_color=C_CARD, hover_color=C_ACCENT2_HVR, text_color=C_TEXT,
+            font=self._font(11, "bold"), command=self._export_markdown,
+        ).pack(side="left")
 
         self._update_topbar_badges()
 
-        # ── Right: Action Buttons ─────────────────────────────────────────
-        actions_frame = ctk.CTkFrame(topbar, fg_color="transparent")
-        actions_frame.grid(row=0, column=2, padx=(0, 20), pady=10, sticky="e")
-
-        # Export Markdown
-        export_btn = ctk.CTkButton(
-            actions_frame,
-            text="📄 ส่งออก Markdown",
-            width=130,
-            height=34,
-            fg_color=C_CARD,
-            hover_color=C_BORDER,
-            text_color=C_TEXT,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
-            command=self._export_markdown,
-        )
-        export_btn.pack(side="left", padx=(0, 8))
-
-        # Clear Chat
-        clear_btn = ctk.CTkButton(
-            actions_frame,
-            text="🗑 ล้างแชท",
-            width=90,
-            height=34,
-            fg_color=C_DANGER,
-            hover_color=C_DANGER_HVR,
-            text_color="white",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
-            command=self._clear_chat,
-        )
-        clear_btn.pack(side="left", padx=(0, 8))
-
-        # Settings Popup Button
-        settings_btn = ctk.CTkButton(
-            actions_frame,
-            text="⚙️ ตั้งค่า (Settings)",
-            width=135,
-            height=34,
-            fg_color=C_ACCENT2,
-            hover_color=C_ACCENT2_HVR,
-            text_color="white",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            command=self._open_settings_popup,
-        )
-        settings_btn.pack(side="left")
-
-    def _update_topbar_badges(self) -> None:
-        model = self.config_data.get("model", DEFAULT_MODELS[0])
-        self.model_badge.configure(text=f"🤖 {model}")
-
-        ws = self.config_data.get("workspace", DEFAULT_WORKSPACE)
-        short_ws = os.path.basename(ws) or ws
-        self.ws_badge.configure(text=f"📁 {short_ws}")
-
-    def _open_settings_popup(self) -> None:
-        """Open modal settings dialog."""
-        SettingsDialog(self)
-
-    # ── Main Chat Area ───────────────────────────────────────────────────
-
-    def _build_chat_area(self) -> None:
-        chat_frame = ctk.CTkFrame(self, fg_color=C_BG, corner_radius=0)
-        chat_frame.grid(row=1, column=0, sticky="nsew")
-        chat_frame.grid_rowconfigure(0, weight=1)
-        chat_frame.grid_columnconfigure(0, weight=1)
-
-        # ── Messages scrollable area ──────────────────────────────────────
+        # Messages
         self.messages_frame = ctk.CTkScrollableFrame(
-            chat_frame,
-            fg_color=C_BG,
-            scrollbar_button_color=C_BORDER,
-            scrollbar_button_hover_color=C_ACCENT2,
+            main, fg_color=C_BG, scrollbar_button_color=C_BG, scrollbar_button_hover_color=C_BORDER,
         )
-        self.messages_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        self.messages_frame.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
         self.messages_frame.columnconfigure(0, weight=1)
 
-        # ── Status bar ────────────────────────────────────────────────────
-        self.status_var = tk.StringVar(value="✅ Ready — พิมพ์ข้อความแล้วกด Enter หรือ Send ได้เลย")
-        status_bar = ctk.CTkFrame(chat_frame, fg_color=C_SIDEBAR, corner_radius=0, height=28)
-        status_bar.grid(row=1, column=0, sticky="ew")
-        status_bar.grid_propagate(False)
-        ctk.CTkLabel(
-            status_bar,
-            textvariable=self.status_var,
-            text_color=C_TEXT_DIM,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-        ).grid(row=0, column=0, padx=16, pady=4, sticky="w")
-
-        # ── Input area ────────────────────────────────────────────────────
-        input_frame = ctk.CTkFrame(chat_frame, fg_color=C_SIDEBAR, corner_radius=0)
-        input_frame.grid(row=2, column=0, sticky="ew")
-        input_frame.columnconfigure(0, weight=1)
+        # Composer
+        comp_wrap = ctk.CTkFrame(main, fg_color=C_BG, corner_radius=0)
+        comp_wrap.grid(row=2, column=0, sticky="ew", padx=40, pady=(6, 4))
+        comp_wrap.columnconfigure(0, weight=1)
+        composer = ctk.CTkFrame(comp_wrap, fg_color=C_CARD, corner_radius=26,
+                                border_width=1, border_color=C_BORDER)
+        composer.grid(row=0, column=0, sticky="ew")
+        composer.columnconfigure(1, weight=1)
 
         self.input_box = ctk.CTkTextbox(
-            input_frame,
-            height=85,
-            fg_color=C_CARD,
-            border_color=C_BORDER,
-            border_width=1,
-            text_color=C_TEXT,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=13),
-            wrap="word",
+            composer, height=64, fg_color=C_CARD, border_width=0, text_color=C_TEXT,
+            font=self._font(13), wrap="word",
         )
-        self.input_box.grid(row=0, column=0, padx=(20, 10), pady=12, sticky="ew")
+        self.input_box.grid(row=0, column=0, columnspan=3, padx=18, pady=(12, 0), sticky="ew")
         self.input_box.bind("<Return>", self._on_enter_key)
         self.input_box.bind("<Shift-Return>", lambda e: None)
         self._attach_context_menu(self.input_box)
 
-        self.send_btn = ctk.CTkButton(
-            input_frame,
-            text="Send\n▶",
-            width=85,
-            height=85,
-            fg_color=C_ACCENT,
-            hover_color=C_ACCENT_HVR,
-            text_color="white",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
-            command=self._on_send,
+        self.plus_btn = ctk.CTkButton(
+            composer, text="+", width=36, height=36, corner_radius=18,
+            fg_color="transparent", border_width=1, border_color=C_BORDER,
+            hover_color=C_ACCENT2_HVR, text_color=C_TEXT, font=self._font(18, "bold"),
+            command=self._composer_plus_menu,
         )
-        self.send_btn.grid(row=0, column=1, padx=(0, 20), pady=12)
+        self.plus_btn.grid(row=1, column=0, padx=(12, 0), pady=(4, 12), sticky="w")
+
+        self.send_btn = ctk.CTkButton(
+            composer, text="↑", width=40, height=40, corner_radius=20,
+            fg_color=C_ACCENT, hover_color=C_ACCENT_HVR, text_color="white",
+            font=self._font(18, "bold"), command=self._on_send,
+        )
+        self.send_btn.grid(row=1, column=2, padx=(0, 12), pady=(4, 12), sticky="e")
+
+        self.status_var = tk.StringVar(value="✅ Ready — พิมพ์ข้อความแล้วกด Enter ได้เลย (Shift+Enter ขึ้นบรรทัดใหม่)")
+        ctk.CTkLabel(main, textvariable=self.status_var, text_color=C_TEXT_DIM,
+                     font=self._font(11)).grid(row=3, column=0, pady=(0, 8))
+
+    def _composer_plus_menu(self) -> None:
+        menu = tk.Menu(self, tearoff=0, bg=C_CARD, fg=C_TEXT, activebackground=C_ACCENT,
+                       activeforeground="#ffffff", bd=1, font=(FONT_FAMILY, 10))
+        menu.add_command(label="💬  แชทใหม่", command=self._new_conversation)
+        menu.add_command(label="📎  แทรกพาธไฟล์", command=self._insert_file_path)
+        menu.add_command(label="📄  ส่งออก Markdown", command=self._export_markdown)
+        x = self.plus_btn.winfo_rootx()
+        y = self.plus_btn.winfo_rooty() - 90
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _insert_file_path(self) -> None:
+        ws = self.config_data.get("workspace", DEFAULT_WORKSPACE)
+        path = filedialog.askopenfilename(title="เลือกไฟล์", initialdir=ws)
+        if path and not self.is_thinking:
+            self.input_box.insert("insert", path)
+
+    def _update_topbar_badges(self) -> None:
+        model = self.config_data.get("model", DEFAULT_MODELS[0])
+        ws = self.config_data.get("workspace", DEFAULT_WORKSPACE)
+        short_ws = os.path.basename(ws) or ws
+        self.model_badge.configure(text=f"🤖 {model} · 📁 {short_ws}")
+        if hasattr(self, "sidebar_model_lbl"):
+            self.sidebar_model_lbl.configure(text=model)
+
+    def _update_header(self) -> None:
+        conv = self.store.get(self.current_id) if self.current_id else {}
+        title = conv.get("title") or "แชทใหม่"
+        self.header_title.configure(text=self._truncate(title, 40))
+        self.header_avatar.configure(text=title.strip()[:1].upper() or "?",
+                                     fg_color=conv.get("avatarColor") or AVATAR_COLORS[0])
+
+    def _open_settings_popup(self) -> None:
+        SettingsDialog(self)
 
     # ────────────────────────────────────────────────────────────────────
-    # History restoration
+    # Conversations
     # ────────────────────────────────────────────────────────────────────
 
-    def _restore_chat_history(self) -> None:
-        """Render previous chat session messages or show welcome guide."""
-        if self.chat_history:
-            self._add_system_message(
-                f"📜 **โหลดประวัติการสนทนาเดิม ({len(self.chat_history)} ข้อความ)**\n"
-                f"คุณสามารถสนทนาและสั่งงานต่อจากเดิมได้ทันที หรือกด '🗑 ล้างแชท' หากต้องการเริ่มใหม่"
-            )
-            for msg in self.chat_history:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                if role in ("user", "assistant"):
-                    self._render_bubble_widget(role, content)
-                elif role == "system":
-                    self._render_system_widget(content)
-            self._scroll_to_bottom()
-        else:
+    def _new_conversation(self) -> None:
+        if self.current_id:
+            cur = self.store.get(self.current_id)
+            if not any(m.get("role") in ("user", "assistant") for m in cur.get("messages", [])):
+                self.input_box.focus_set()
+                return  # current chat is already empty → reuse it
+        conv = self.store.create()
+        self._select_conversation(conv["id"])
+        self.input_box.focus_set()
+
+    def _select_conversation(self, conv_id: str) -> None:
+        self.current_id = conv_id
+        self._render_conversation()
+        self._update_header()
+        self._refresh_sidebar()
+        self._set_input_enabled(not self.is_thinking)
+
+    def _render_conversation(self) -> None:
+        for w in self.messages_frame.winfo_children():
+            w.destroy()
+        self._msg_row = 0
+        self._last_sep_ts = 0
+        msgs = self.chat_history
+        if not any(m.get("role") in ("user", "assistant") for m in msgs):
             self._show_welcome_message()
+        for msg in msgs:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            self._maybe_date_separator(msg.get("ts") or 0)
+            if role in ("user", "assistant"):
+                self._render_bubble_widget(role, content)
+            elif role == "system":
+                self._render_system_widget(content)
+        self._scroll_to_bottom()
+
+    def _rename_conversation(self, conv_id: str) -> None:
+        conv = self.store.get(conv_id)
+        dlg = ctk.CTkInputDialog(text=f"ชื่อใหม่ของแชท:\n(เดิม: {conv.get('title')})", title="เปลี่ยนชื่อแชท")
+        new_title = dlg.get_input()
+        if new_title and new_title.strip():
+            self.store.rename(conv_id, new_title)
+            self.sync.push_conversation(self.store.get(conv_id))
+            self._refresh_sidebar()
+            if conv_id == self.current_id:
+                self._update_header()
+
+    def _delete_conversation(self, conv_id: str) -> None:
+        if self.is_thinking and self.thinking_conv == conv_id:
+            messagebox.showinfo("กรุณารอ", "กรุณารอ AI ทำงานเสร็จก่อนลบแชทนี้ครับ")
+            return
+        title = self.store.get(conv_id).get("title")
+        if not messagebox.askyesno("ยืนยันการลบ", f"ต้องการลบแชท \"{title}\" ใช่หรือไม่?\n(จะถูกลบจาก Firebase ด้วย)"):
+            return
+        msg_ids = self.store.delete(conv_id)
+        self.chat_sessions.pop(conv_id, None)
+        self.sync.delete_conversation(conv_id, msg_ids)
+        if conv_id == self.current_id:
+            self.current_id = None
+            convs = self.store.list()
+            if convs:
+                self._select_conversation(convs[0]["id"])
+            else:
+                self._new_conversation()
+        self._refresh_sidebar()
+
+    # ────────────────────────────────────────────────────────────────────
+    # Message rendering helpers
+    # ────────────────────────────────────────────────────────────────────
 
     def _show_welcome_message(self) -> None:
-        self._add_system_message(
+        self._render_system_widget(
             "👋  ยินดีต้อนรับสู่ **Local AI Coding Agent**!\n\n"
-            "• คลิก **⚙️ ตั้งค่า (Settings)** ด้านขวาบน เพื่อใส่ Gemini API Key และเลือก Workspace\n"
-            "• ประวัติการแชทจะถูกบันทึกอัตโนมัติ เปิดโปรแกรมรอบหน้าทำงานต่อได้ทันที\n"
-            "• คลิก **📄 ส่งออก Markdown** เพื่อเซฟบทสนทนาเป็นไฟล์ `.md` สำหรับลง GitHub ได้เลย\n\n"
+            "• คลิก **⚙️ ตั้งค่า (Settings)** มุมซ้ายล่าง เพื่อใส่ Gemini API Key และเลือก Workspace\n"
+            "• แต่ละแชทถูกบันทึกในเครื่อง (chats/) และซิงก์ขึ้น Firebase อัตโนมัติ\n"
+            "• กด **+** มุมซ้ายบนเพื่อเริ่มแชทใหม่ · คลิกขวาที่แชทเพื่อเปลี่ยนชื่อ/ลบ\n"
+            "• คลิก **📄 ส่งออก Markdown** เพื่อเซฟบทสนทนาเป็นไฟล์ `.md`\n\n"
             "ตัวอย่างคำสั่งที่สั่งได้:\n"
             "• `สร้างเว็บแอป Flask อย่างง่ายใน workspace`\n"
             "• `อ่านไฟล์ main.py แล้วอธิบายให้ฉันฟัง`\n"
             "• `รัน pip install requests แล้วแจ้งผลให้ทราบ`"
         )
 
-    # ────────────────────────────────────────────────────────────────────
-    # Message rendering helpers
-    # ────────────────────────────────────────────────────────────────────
+    def _maybe_date_separator(self, ts: int) -> None:
+        if not ts:
+            return
+        if self._last_sep_ts and ts - self._last_sep_ts < 30 * 60 * 1000:
+            return
+        self._last_sep_ts = ts
+        ctk.CTkLabel(self.messages_frame, text=format_date_separator(ts), text_color=C_TEXT_DIM,
+                     font=self._font(11)).grid(row=self._msg_row, column=0, pady=(14, 4))
+        self._msg_row += 1
 
-    def _add_message_bubble(self, role: str, text: str) -> None:
-        """Add message to UI and save to persistent history."""
-        now_str = datetime.datetime.now().strftime("%H:%M")
-        self.chat_history.append({
-            "role": role,
-            "content": text,
-            "time": now_str,
-        })
-        save_chat_history(self.chat_history)
-        self._render_bubble_widget(role, text)
-        self._scroll_to_bottom()
+    def _add_message(self, conv_id: str, role: str, text: str) -> None:
+        """Persist locally, queue Firestore write, render if visible."""
+        if conv_id not in self.store.metas:
+            return  # conversation deleted meanwhile
+        msg = self.store.add_message(conv_id, role, text)
+        meta = self.store.get(conv_id)
+        self.sync.push_message(conv_id, msg)
+        self.sync.push_conversation(meta, self.store.markdown(conv_id) if role == "assistant" else None)
+        if conv_id == self.current_id:
+            self._maybe_date_separator(msg["ts"])
+            self._render_bubble_widget(role, text)
+            self._scroll_to_bottom()
+            self._update_header()
+        self._refresh_sidebar()
 
     def _render_bubble_widget(self, role: str, text: str) -> None:
         is_user = role == "user"
-        bubble_color = C_USER_BUBBLE if is_user else C_AI_BUBBLE
-        label_text  = "👤 You" if is_user else "🤖 Agent"
-        label_color = C_ACCENT2 if is_user else C_ACCENT
-
         outer = ctk.CTkFrame(self.messages_frame, fg_color="transparent")
-        outer.grid(row=self._msg_row, column=0, sticky="ew", padx=20, pady=(8, 0))
+        outer.grid(row=self._msg_row, column=0, sticky="ew", padx=28, pady=(6, 6))
         outer.columnconfigure(0, weight=1)
         self._msg_row += 1
 
-        ctk.CTkLabel(
-            outer,
-            text=label_text,
-            text_color=label_color,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
-        ).grid(row=0, column=0, sticky="w", padx=4)
-
-        bubble = ctk.CTkFrame(outer, fg_color=bubble_color, corner_radius=10)
-        bubble.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        bubble = ctk.CTkFrame(outer, fg_color=C_USER_BUBBLE if is_user else C_AI_BUBBLE, corner_radius=18)
+        if is_user:
+            bubble.grid(row=0, column=0, sticky="e", padx=(140, 0))
+        else:
+            bubble.grid(row=0, column=0, sticky="w", padx=(0, 140))
         bubble.columnconfigure(0, weight=1)
-
         self._render_message_content(bubble, text)
 
-        # Separator
-        ctk.CTkFrame(
-            self.messages_frame, height=1, fg_color=C_BORDER,
-        ).grid(row=self._msg_row, column=0, sticky="ew", padx=28, pady=(8, 0))
-        self._msg_row += 1
-
-    def _render_message_content(self, parent: ctk.CTkFrame, text: str) -> None:
+    def _render_message_content(self, parent: ctk.CTkFrame, text: str, wrap: int = 640) -> None:
         """Render text with code block detection."""
         parts = re.split(r"(```[\s\S]*?```)", text)
         row = 0
@@ -1006,111 +1240,85 @@ class App(ctk.CTk):
             if part.startswith("```") and part.endswith("```"):
                 inner = part[3:-3]
                 newline_idx = inner.find("\n")
-                if newline_idx != -1:
-                    code_body = inner[newline_idx + 1:]
-                else:
-                    code_body = inner
+                code_body = inner[newline_idx + 1:] if newline_idx != -1 else inner
 
-                code_frame = ctk.CTkFrame(parent, fg_color=C_CODE_BG, corner_radius=6)
-                code_frame.grid(row=row, column=0, sticky="ew", padx=10, pady=(4, 4))
+                code_frame = ctk.CTkFrame(parent, fg_color=C_CODE_BG, corner_radius=10)
+                code_frame.grid(row=row, column=0, sticky="ew", padx=10, pady=(6, 6))
                 code_frame.columnconfigure(0, weight=1)
 
                 code_label = ctk.CTkTextbox(
                     code_frame,
                     fg_color=C_CODE_BG,
                     text_color="#79c0ff",
-                    font=ctk.CTkFont(family=FONT_CODE, size=12),
+                    font=self._font(12, code=True),
                     wrap="none",
                     activate_scrollbars=True,
                     border_width=0,
+                    width=wrap,
                     height=min(max(code_body.count("\n") + 2, 3), 30) * 20,
                 )
                 code_label.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
                 code_label.insert("1.0", code_body.strip())
                 code_label.configure(state="disabled")
                 self._attach_context_menu(code_label)
-            else:
-                if part.strip():
-                    txt_label = ctk.CTkLabel(
-                        parent,
-                        text=part.strip(),
-                        text_color=C_TEXT,
-                        font=ctk.CTkFont(family=FONT_FAMILY, size=13),
-                        wraplength=880,
-                        justify="left",
-                        anchor="w",
-                    )
-                    txt_label.grid(row=row, column=0, sticky="ew", padx=14, pady=(6, 4))
+            elif part.strip():
+                ctk.CTkLabel(
+                    parent,
+                    text=part.strip(),
+                    text_color=C_TEXT,
+                    font=self._font(13),
+                    wraplength=wrap,
+                    justify="left",
+                    anchor="w",
+                ).grid(row=row, column=0, sticky="w", padx=16, pady=(8, 8))
             row += 1
 
-    def _add_system_message(self, text: str) -> None:
-        """Add system note and save to history."""
-        self.chat_history.append({
-            "role": "system",
-            "content": text,
-            "time": datetime.datetime.now().strftime("%H:%M"),
-        })
-        save_chat_history(self.chat_history)
-        self._render_system_widget(text)
-        self._scroll_to_bottom()
+    def _add_system_message(self, text: str, conv_id: str | None = None, persist: bool = True) -> None:
+        conv_id = conv_id or self.current_id
+        if persist and conv_id and conv_id in self.store.metas:
+            self.store.add_message(conv_id, "system", text)  # local only, not synced
+        if conv_id == self.current_id:
+            self._render_system_widget(text)
+            self._scroll_to_bottom()
 
     def _render_system_widget(self, text: str) -> None:
-        frame = ctk.CTkFrame(self.messages_frame, fg_color=C_CARD, corner_radius=8)
-        frame.grid(row=self._msg_row, column=0, sticky="ew", padx=40, pady=10)
+        frame = ctk.CTkFrame(self.messages_frame, fg_color=C_SELECTED, corner_radius=14)
+        frame.grid(row=self._msg_row, column=0, sticky="ew", padx=80, pady=10)
         frame.columnconfigure(0, weight=1)
         self._msg_row += 1
+        ctk.CTkLabel(frame, text=text, text_color=C_TEXT_DIM, font=self._font(12),
+                     wraplength=700, justify="left").grid(row=0, column=0, sticky="ew", padx=16, pady=10)
 
-        ctk.CTkLabel(
-            frame,
-            text=text,
-            text_color=C_TEXT_DIM,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            wraplength=840,
-            justify="left",
-        ).grid(row=0, column=0, sticky="ew", padx=16, pady=10)
-
-    def _add_tool_indicator(self, tool_name: str, detail: str = "") -> None:
-        icons = {
-            "list_files": "📂",
-            "read_file": "📄",
-            "write_file": "✍️",
-            "run_command": "⚡",
-        }
-        icon = icons.get(tool_name, "🔧")
-        label_text = f"{icon} Tool: {tool_name}"
+    def _add_tool_indicator(self, conv_id: str, tool_name: str, detail: str = "") -> None:
+        if conv_id != self.current_id:
+            return
+        icons = {"list_files": "📂", "read_file": "📄", "write_file": "✍️", "run_command": "⚡"}
+        label_text = f"{icons.get(tool_name, '🔧')} Tool: {tool_name}"
         if detail:
             label_text += f"  →  {detail[:80]}"
-
-        indicator = ctk.CTkFrame(self.messages_frame, fg_color=C_CARD, corner_radius=6)
-        indicator.grid(row=self._msg_row, column=0, sticky="ew", padx=36, pady=(2, 2))
+        indicator = ctk.CTkFrame(self.messages_frame, fg_color="#232323", corner_radius=12)
+        indicator.grid(row=self._msg_row, column=0, sticky="w", padx=40, pady=(2, 2))
         self._msg_row += 1
-
-        ctk.CTkLabel(
-            indicator,
-            text=label_text,
-            text_color="#3fb950",
-            font=ctk.CTkFont(family=FONT_CODE, size=11),
-        ).grid(row=0, column=0, sticky="w", padx=10, pady=4)
-
+        ctk.CTkLabel(indicator, text=label_text, text_color=C_OK,
+                     font=self._font(11, code=True)).grid(row=0, column=0, sticky="w", padx=12, pady=4)
         self._scroll_to_bottom()
 
     def _scroll_to_bottom(self) -> None:
         self.after(80, lambda: self.messages_frame._parent_canvas.yview_moveto(1.0))
 
     # ────────────────────────────────────────────────────────────────────
-    # Markdown Export
+    # Markdown Export (manual)
     # ────────────────────────────────────────────────────────────────────
 
-    def _export_markdown(self) -> None:
-        """Export current chat history to a Markdown file."""
-        if not self.chat_history:
+    def _export_markdown(self, conv_id: str | None = None) -> None:
+        conv_id = conv_id or self.current_id
+        conv = self.store.get(conv_id) if conv_id else {}
+        history = conv.get("messages", [])
+        if not history:
             messagebox.showinfo("ไม่มีข้อความ", "ยังไม่มีประวัติการสนทนาให้ส่งออกครับ")
             return
-
         workspace = self.config_data.get("workspace", DEFAULT_WORKSPACE)
         default_name = f"CHAT_HISTORY_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        default_path = os.path.join(workspace, default_name)
-
         target_file = filedialog.asksaveasfilename(
             title="บันทึกประวัติการแชทเป็น Markdown",
             initialdir=workspace,
@@ -1118,18 +1326,61 @@ class App(ctk.CTk):
             defaultextension=".md",
             filetypes=[("Markdown files", "*.md"), ("All files", "*.*")],
         )
-
         if target_file:
             try:
-                export_chat_to_markdown(self.chat_history, target_file)
+                export_chat_to_markdown(history, target_file, conv.get("title"))
                 self.status_var.set(f"📄 ส่งออก Markdown สำเร็จ: {os.path.basename(target_file)}")
-                messagebox.showinfo(
-                    "ส่งออกสำเร็จ",
-                    f"✅ ส่งออกประวัติการแชทเรียบร้อยแล้ว!\n\nไฟล์: {target_file}\n"
-                    "คุณสามารถนำไฟล์นี้ไปใส่ใน GitHub Repo เพื่อบันทึกงานได้ทันทีครับ"
-                )
+                messagebox.showinfo("ส่งออกสำเร็จ", f"✅ ส่งออกประวัติการแชทเรียบร้อยแล้ว!\n\nไฟล์: {target_file}")
             except Exception as exc:
                 messagebox.showerror("เกิดข้อผิดพลาด", f"ไม่สามารถบันทึกไฟล์ได้: {exc}")
+
+    # ────────────────────────────────────────────────────────────────────
+    # Firebase sync callbacks (run on UI thread via queue)
+    # ────────────────────────────────────────────────────────────────────
+
+    def _on_sync_status(self, state: str, detail: str) -> None:
+        if state == fbsync.STATE_OK:
+            self.sync_lbl.configure(text="✅ บันทึกขึ้น Firebase แล้ว", text_color=C_OK)
+            self.sync_tip.text = f"Firestore: {self.config_data.get('firebase_project_id')}"
+            self._sync_error_shown = ""
+        elif state == fbsync.STATE_SYNCING:
+            self.sync_lbl.configure(text="⏳ กำลังซิงก์...", text_color=C_TEXT_DIM)
+        elif state == fbsync.STATE_ERROR:
+            pending = self.sync.pending()
+            self.sync_lbl.configure(text="⚠️ ซิงก์ไม่สำเร็จ", text_color=C_WARN)
+            self.sync_tip.text = f"{detail}\n(ค้างในคิว {pending} รายการ — จะลองใหม่อัตโนมัติ)"
+            if detail and detail != self._sync_error_shown:
+                self._sync_error_shown = detail
+                hint = ""
+                if any(k in detail for k in ("OPERATION_NOT_ALLOWED", "ADMIN_ONLY", "CONFIGURATION_NOT_FOUND")):
+                    hint = ("\n💡 ไปที่ Firebase Console > Authentication กด Get started "
+                            "แล้วเปิด Sign-in method > Anonymous")
+                self._add_system_message(f"⚠️ ซิงก์ Firebase ไม่สำเร็จ: {detail}{hint}\n"
+                                         "ข้อมูลยังถูกเก็บในเครื่องและจะซิงก์ให้อัตโนมัติเมื่อเชื่อมต่อได้",
+                                         persist=False)
+        else:
+            self.sync_lbl.configure(text="☁️ ปิดการซิงก์ Firebase", text_color=C_TEXT_DIM)
+            self.sync_tip.text = "เปิดได้ใน ⚙️ ตั้งค่า"
+
+    def _on_remote_pull(self, remote: list[dict]) -> None:
+        try:
+            changed, to_upload = self.store.merge_remote(remote)
+        except Exception as exc:
+            logger.warning("Merge remote failed: %s", exc)
+            return
+        for cid in to_upload:
+            conv = self.store.get(cid)
+            chat_msgs = [m for m in conv.get("messages", []) if m.get("role") in ("user", "assistant")]
+            if not chat_msgs:
+                continue
+            for m in chat_msgs:
+                if "id" in m:
+                    self.sync.push_message(cid, m)
+            self.sync.push_conversation(conv, self.store.markdown(cid))
+        self._refresh_sidebar()
+        if self.current_id in changed and not self.is_thinking:
+            self._render_conversation()
+            self._update_header()
 
     # ────────────────────────────────────────────────────────────────────
     # UI queue
@@ -1139,16 +1390,23 @@ class App(ctk.CTk):
         try:
             while True:
                 cmd, *args = self._ui_queue.get_nowait()
-                if cmd == "add_message":
-                    self._add_message_bubble(*args)
-                elif cmd == "add_tool":
-                    self._add_tool_indicator(*args)
-                elif cmd == "add_system":
-                    self._add_system_message(*args)
-                elif cmd == "status":
-                    self.status_var.set(args[0])
-                elif cmd == "set_thinking":
-                    self._set_thinking_state(args[0])
+                try:
+                    if cmd == "add_message":
+                        self._add_message(*args)
+                    elif cmd == "add_tool":
+                        self._add_tool_indicator(*args)
+                    elif cmd == "add_system":
+                        self._add_system_message(args[1], conv_id=args[0])
+                    elif cmd == "status":
+                        self.status_var.set(args[0])
+                    elif cmd == "set_thinking":
+                        self._set_thinking_state(*args)
+                    elif cmd == "sync_status":
+                        self._on_sync_status(*args)
+                    elif cmd == "remote_pull":
+                        self._on_remote_pull(*args)
+                except Exception:
+                    logger.exception("UI queue command failed: %s", cmd)
         except queue.Empty:
             pass
         self.after(50, self._process_ui_queue)
@@ -1170,68 +1428,52 @@ class App(ctk.CTk):
         if self.is_thinking:
             return
         user_text = self.input_box.get("1.0", "end").strip()
-        if not user_text:
+        if not user_text or not self.current_id:
             return
         self.input_box.delete("1.0", "end")
-        self._add_message_bubble("user", user_text)
-        threading.Thread(
-            target=self._agent_thread, args=(user_text,), daemon=True
-        ).start()
+        conv_id = self.current_id
+        prior = [m for m in self.store.get(conv_id).get("messages", [])]
+        self._add_message(conv_id, "user", user_text)
+        threading.Thread(target=self._agent_thread, args=(conv_id, user_text, prior), daemon=True).start()
 
-    def _clear_chat(self) -> None:
-        if self.is_thinking:
-            messagebox.showinfo("กรุณารอ", "กรุณารอ AI ทำงานเสร็จก่อนล้างแชทครับ")
-            return
-        if messagebox.askyesno("ยืนยัน", "ต้องการล้างประวัติการแชททั้งหมดใช่หรือไม่?"):
-            for widget in self.messages_frame.winfo_children():
-                widget.destroy()
-            self._msg_row = 0
-            self.chat_history.clear()
-            save_chat_history(self.chat_history)
-            self.chat_session = None
-            self._add_system_message("🗑  ล้างบทสนทนาเรียบร้อย เริ่มต้นเซสชันใหม่")
-            self.status_var.set("✅ ล้างบทสนทนาเรียบร้อย — พร้อมรับคำสั่ง")
+    def _set_input_enabled(self, enabled: bool) -> None:
+        self.send_btn.configure(state="normal" if enabled else "disabled",
+                                fg_color=C_ACCENT if enabled else C_BORDER)
+        self.input_box.configure(state="normal" if enabled else "disabled")
 
-    def _set_thinking_state(self, thinking: bool) -> None:
+    def _set_thinking_state(self, thinking: bool, conv_id: str | None = None) -> None:
         self.is_thinking = thinking
-        self.send_btn.configure(
-            state="disabled" if thinking else "normal",
-            fg_color=C_BORDER if thinking else C_ACCENT,
-        )
-        self.input_box.configure(state="disabled" if thinking else "normal")
+        self.thinking_conv = conv_id if thinking else None
+        self._set_input_enabled(not thinking)
 
     # ────────────────────────────────────────────────────────────────────
     # Agent background thread — Gemini API + Function Calling Loop
     # ────────────────────────────────────────────────────────────────────
 
-    def _get_or_create_session(self) -> genai.chats.Chat:
-        if self.chat_session is not None:
-            return self.chat_session
+    def _get_or_create_session(self, conv_id: str, prior: list[dict]) -> genai.chats.Chat:
+        if conv_id in self.chat_sessions:
+            return self.chat_sessions[conv_id]
 
         api_key = self.config_data.get("api_key", "").strip()
         if not api_key:
             raise ValueError(
-                "ยังไม่ได้ตั้งค่า API Key! กรุณาคลิกปุ่ม '⚙️ ตั้งค่า (Settings)' ด้านขวาบนเพื่อระบุ Gemini API Key ครับ"
+                "ยังไม่ได้ตั้งค่า API Key! กรุณาคลิกปุ่ม '⚙️ ตั้งค่า (Settings)' มุมซ้ายล่างเพื่อระบุ Gemini API Key ครับ"
             )
-
         model_name = self.config_data.get("model", DEFAULT_MODELS[0]).strip()
 
-        # Build initial history contents from past messages so the agent has continuous memory
+        # Resume Gemini context from this conversation's previous messages
         history_contents: list[genai_types.Content] = []
-        for msg in self.chat_history:
+        for msg in prior:
             role = msg.get("role")
-            content = msg.get("content", "").strip()
+            content = (msg.get("content") or "").strip()
             if role in ("user", "assistant") and content:
-                gemini_role = "user" if role == "user" else "model"
-                history_contents.append(
-                    genai_types.Content(
-                        role=gemini_role,
-                        parts=[genai_types.Part.from_text(text=content)],
-                    )
-                )
+                history_contents.append(genai_types.Content(
+                    role="user" if role == "user" else "model",
+                    parts=[genai_types.Part.from_text(text=content)],
+                ))
 
         client = genai.Client(api_key=api_key)
-        self.chat_session = client.chats.create(
+        session = client.chats.create(
             model=model_name,
             history=history_contents if history_contents else None,
             config=genai_types.GenerateContentConfig(
@@ -1241,22 +1483,24 @@ class App(ctk.CTk):
                 max_output_tokens=8192,
             ),
         )
-        logger.info("New chat session created (model: %s, history turns: %d)", model_name, len(history_contents))
-        return self.chat_session
+        self.chat_sessions[conv_id] = session
+        logger.info("New chat session for %s (model: %s, history turns: %d)", conv_id, model_name, len(history_contents))
+        return session
 
-    def _agent_thread(self, user_message: str) -> None:
-        self._q("set_thinking", True)
+    def _agent_thread(self, conv_id: str, user_message: str, prior: list[dict]) -> None:
+        self._q("set_thinking", True, conv_id)
         self._q("status", "🤔 กำลังคิด...")
 
         try:
-            session = self._get_or_create_session()
+            session = self._get_or_create_session(conv_id, prior)
             response = session.send_message(user_message)
 
             while True:
                 fn_calls = []
                 text_parts = []
-
-                for candidate in response.candidates:
+                for candidate in response.candidates or []:
+                    if not candidate.content or not candidate.content.parts:
+                        continue
                     for part in candidate.content.parts:
                         if part.function_call:
                             fn_calls.append(part.function_call)
@@ -1266,7 +1510,7 @@ class App(ctk.CTk):
                 if text_parts:
                     combined_text = "\n".join(text_parts).strip()
                     if combined_text:
-                        self._q("add_message", "assistant", combined_text)
+                        self._q("add_message", conv_id, "assistant", combined_text)
 
                 if not fn_calls:
                     break
@@ -1278,7 +1522,7 @@ class App(ctk.CTk):
 
                     self._q("status", f"🔧 กำลังเรียกใช้: {fn_name}...")
                     detail = next(iter(fn_args.values()), "") if fn_args else ""
-                    self._q("add_tool", fn_name, str(detail))
+                    self._q("add_tool", conv_id, fn_name, str(detail))
 
                     tool_fn = tools.TOOL_FUNCTION_MAP.get(fn_name)
                     if tool_fn:
@@ -1289,13 +1533,9 @@ class App(ctk.CTk):
                     else:
                         result_text = f"Unknown tool: {fn_name}"
 
-                    logger.info("Tool %s result (first 200 chars): %s", fn_name, result_text[:200])
-
+                    logger.info("Tool %s result (first 200 chars): %s", fn_name, str(result_text)[:200])
                     function_responses.append(
-                        genai_types.Part.from_function_response(
-                            name=fn_name,
-                            response={"result": result_text},
-                        )
+                        genai_types.Part.from_function_response(name=fn_name, response={"result": result_text})
                     )
 
                 self._q("status", "🤔 กำลังประมวลผลผลลัพธ์...")
@@ -1304,16 +1544,16 @@ class App(ctk.CTk):
             self._q("status", "✅ เสร็จสิ้น — พร้อมรับคำสั่งถัดไป")
 
         except ValueError as exc:
-            self._q("add_system", f"⚠️  {exc}")
+            self._q("add_system", conv_id, f"⚠️  {exc}")
             self._q("status", "⚠️  กรุณาตั้งค่า API Key ก่อน")
-            self.chat_session = None
+            self.chat_sessions.pop(conv_id, None)
 
         except Exception as exc:
             logger.exception("Agent thread error")
             error_msg = str(exc)
-            self._q("add_system", f"❌  เกิดข้อผิดพลาด:\n{error_msg}")
+            self._q("add_system", conv_id, f"❌  เกิดข้อผิดพลาด:\n{error_msg}")
             self._q("status", f"❌  เกิดข้อผิดพลาด — {error_msg[:80]}")
-            self.chat_session = None
+            self.chat_sessions.pop(conv_id, None)
 
         finally:
             self._q("set_thinking", False)
@@ -1324,7 +1564,8 @@ class App(ctk.CTk):
 
     def _on_close(self) -> None:
         save_config(self.config_data)
-        save_chat_history(self.chat_history)
+        self.store.save_index()
+        self.sync.stop()  # pending writes stay in sync_backlog.json for next start
         logger.info("Application closing")
         self.destroy()
 
