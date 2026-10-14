@@ -1,0 +1,33 @@
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# ── Virtual environments ────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── PyInstaller build artifacts ────────────────────────────────
+build/
+dist/
+*.spec
+
+# ── Application data / secrets ─────────────────────────────────
+config.json
+app.log
+*.log
+
+# ── OS artifacts ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user
