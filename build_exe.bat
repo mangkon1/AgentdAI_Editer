@@ -59,6 +59,8 @@ echo [3/3] Running PyInstaller...
     --hidden-import google.genai ^
     --hidden-import google.genai.types ^
     --hidden-import customtkinter ^
+    --hidden-import firebase_sync ^
+    --hidden-import conversation_store ^
     main.py
 
 if %ERRORLEVEL% NEQ 0 (

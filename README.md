@@ -16,7 +16,9 @@ A modern Windows desktop application powered by **Google Gemini** (`google-genai
 |---|---|
 | 🎨 **Full-Width Modern UI** | `customtkinter` dark-mode interface with maximized code viewing area |
 | ⚙️ **Settings Modal Popup** | Dedicated popup dialog (`CTkToplevel`) for API Key, Model & Workspace |
-| 📜 **Persistent Chat History** | Conversations auto-saved to `chat_history.json` — resume work across restarts |
+| 💬 **Multi-conversation Sidebar** | Grok-style sidebar: many chats, search, rename/delete (right-click), colourful avatars |
+| ☁️ **Firebase Firestore Sync** | Every message is synced in realtime to Cloud Firestore (offline backlog + auto retry) |
+| 📜 **Persistent Chat History** | Each chat saved to `chats/<id>.json` (offline cache) — resume work across restarts |
 | 📄 **Export to Markdown** | One-click export to `CHAT_HISTORY.md` to commit and track progress on GitHub |
 | ⌨️ **Universal Keyboard Shortcuts** | Hardware keycode-based `Ctrl+C`, `Ctrl+V`, `Ctrl+A`, `Ctrl+X`, `Ctrl+Z` that work in both Thai and English |
 | 🖱️ **Right-Click Context Menu** | Cut, Copy, Paste, and Select All context menu on all fields |
@@ -80,10 +82,48 @@ The application maintains two persistent JSON files in the same folder as the `.
    ```
    *(Excluded from Git via `.gitignore` to protect your secret key)*
 
-2. **`chat_history.json`**:
-   Automatically records your multi-turn conversation so that closing and reopening the app restores your work session seamlessly.
+2. **`chats/index.json` + `chats/<id>.json`**:
+   แคชในเครื่องของทุกบทสนทนา (ใช้งานออฟไลน์ได้) — ไฟล์ `chat_history.json` แบบเก่าจะถูกย้ายเข้าเป็น 1 บทสนทนาอัตโนมัติ (แล้วเปลี่ยนชื่อเป็น `chat_history.json.migrated`)
+
+3. **`sync_backlog.json`**: คิวรายการที่ยังซิงก์ขึ้น Firebase ไม่สำเร็จ (จะถูกส่งต่อให้อัตโนมัติเมื่อออนไลน์)
 
 Get a free Gemini API key at [Google AI Studio](https://aistudio.google.com/app/apikey).
+
+---
+
+## ☁️ ซิงก์ประวัติแชทขึ้น Firebase Cloud Firestore (อัตโนมัติ)
+
+แอปจะบันทึกทุกข้อความขึ้น **Cloud Firestore** แบบเรียลไทม์ในเบื้องหลัง (ไม่ทำให้ UI ค้าง) โดยใช้ REST API ผ่าน `urllib` ล้วน (ไม่ต้องติดตั้งไลบรารีเพิ่ม — เหมาะกับ PyInstaller)
+
+- โปรเจกต์: `agentdai-editer` · Firestore `(default)` (Native mode, `asia-southeast1`)
+- ยืนยันตัวตนด้วย **Firebase Auth แบบ Anonymous** — ระบบจะเก็บ `uid` และ `refreshToken` ไว้ใน `config.json`
+- โครงสร้างข้อมูล:
+  ```
+  users/{uid}/conversations/{convId}
+      title, preview, avatarColor, createdAt, updatedAt, markdown (บทสนทนาทั้งหมดเป็น Markdown)
+  users/{uid}/conversations/{convId}/messages/{msgId}
+      role, text, ts
+  ```
+- สถานะแสดงที่หัวจอ: `✅ บันทึกขึ้น Firebase แล้ว` / `⏳ กำลังซิงก์...` / `⚠️ ซิงก์ไม่สำเร็จ` (เอาเมาส์ชี้เพื่อดูรายละเอียด error)
+- ถ้าออฟไลน์ ข้อมูลจะถูกเก็บใน `sync_backlog.json` และลองส่งใหม่อัตโนมัติ
+- เปิดแอปครั้งถัดไป ระบบจะดึงบทสนทนาจาก Firestore มารวมกับข้อมูลในเครื่อง
+- เปิด/ปิดการซิงก์ และแก้ Project ID / Web API Key ได้ที่ **⚙️ ตั้งค่า**
+
+### ⚠️ ต้องเปิด Anonymous sign-in ก่อน
+
+1. ไปที่ [Firebase Console](https://console.firebase.google.com/project/agentdai-editer/authentication) > **Authentication** (ถ้ายังไม่เคยใช้ ให้กด **Get started**)
+2. แท็บ **Sign-in method** > เลือก **Anonymous** > **Enable** > Save
+3. หากยังไม่เปิด จะเห็น error เช่น `CONFIGURATION_NOT_FOUND` หรือ `OPERATION_NOT_ALLOWED` / `ADMIN_ONLY_OPERATION`
+
+### 🔒 Firestore Security Rules
+
+ไฟล์ `firestore.rules` อนุญาตให้ผู้ใช้อ่าน/เขียนได้เฉพาะข้อมูลของตัวเอง (`users/{uid}/...`) — deploy ด้วย:
+```bash
+npm i -g firebase-tools
+firebase login
+firebase deploy --only firestore:rules --project agentdai-editer
+```
+(หรือคัดลอกเนื้อหาไปวางใน Firebase Console > Firestore Database > Rules)
 
 ---
 
@@ -114,7 +154,10 @@ The AI agent can autonomously call these tools:
 
 ```
 AIAgentdEditer/
-├── main.py                          # Main GUI application & Settings popup
+├── main.py                          # Main GUI application (sidebar + chat) & Settings popup
+├── conversation_store.py            # Local multi-conversation store (chats/)
+├── firebase_sync.py                 # Firestore REST sync worker + anonymous auth
+├── firestore.rules / firebase.json  # Firestore security rules
 ├── agent_tools.py                   # Gemini tool declarations and execution
 ├── requirements.txt                 # Dependencies (customtkinter, google-genai, pyinstaller)
 ├── build_exe.bat                    # Local PyInstaller build script
