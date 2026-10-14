@@ -874,10 +874,7 @@ class App(ctk.CTk):
         # App avatar / logo + name
         brand = ctk.CTkFrame(sb, fg_color="transparent")
         brand.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        ctk.CTkLabel(
-            brand, text="🤖", width=76, height=76, corner_radius=38,
-            fg_color=C_ACCENT, text_color="white", font=self._font(34),
-        ).pack(pady=(0, 6))
+        self._avatar(brand, 76, C_ACCENT, "🤖", 32).pack(pady=(0, 6))
         ctk.CTkLabel(brand, text="Local AI Agent", text_color=C_TEXT, font=self._font(16, "bold")).pack()
         self.sidebar_model_lbl = ctk.CTkLabel(brand, text="", text_color=C_TEXT_DIM, font=self._font(11))
         self.sidebar_model_lbl.pack()
@@ -942,10 +939,7 @@ class App(ctk.CTk):
         frame.grid(row=row, column=0, sticky="ew", padx=2, pady=2)
         frame.grid_columnconfigure(1, weight=1)
         title = meta.get("title") or "แชทใหม่"
-        initial = title.strip()[:1].upper() or "?"
-        avatar = ctk.CTkLabel(frame, text=initial, width=42, height=42, corner_radius=21,
-                              fg_color=meta.get("avatarColor") or AVATAR_COLORS[0],
-                              text_color="white", font=self._font(16, "bold"))
+        avatar = self._avatar(frame, 42, meta.get("avatarColor") or AVATAR_COLORS[0], self._initial(title), 16)
         avatar.grid(row=0, column=0, rowspan=2, padx=(10, 10), pady=10)
         t_lbl = ctk.CTkLabel(frame, text=self._truncate(title, 24), anchor="w", text_color=C_TEXT,
                              font=self._font(13, "bold"))
@@ -962,12 +956,32 @@ class App(ctk.CTk):
             if cid != self.current_id:
                 frame.configure(fg_color="transparent")
 
-        for w in (frame, avatar, t_lbl, p_lbl):
+        for w in (frame, avatar, avatar.label, t_lbl, p_lbl):
             w.bind("<Button-1>", lambda _e, c=cid: self._select_conversation(c))
             w.bind("<Button-3>", lambda e, c=cid: self._conv_context_menu(e, c))
             w.bind("<Enter>", on_enter, add="+")
             w.bind("<Leave>", on_leave, add="+")
         self._conv_rows[cid] = frame
+
+    def _avatar(self, parent, size: int, color: str, text: str, font_size: int) -> ctk.CTkFrame:
+        """Perfectly round avatar: fixed-size frame (no propagation) + centered label."""
+        circle = ctk.CTkFrame(parent, width=size, height=size, corner_radius=size // 2,
+                              fg_color=color, bg_color="transparent")
+        circle.pack_propagate(False)
+        circle.grid_propagate(False)
+        lbl = ctk.CTkLabel(circle, text=text, fg_color="transparent", text_color="white",
+                           font=self._font(font_size, "bold"))
+        lbl.place(relx=0.5, rely=0.5, anchor="center")
+        circle.label = lbl  # type: ignore[attr-defined]
+        return circle
+
+    @staticmethod
+    def _initial(title: str) -> str:
+        for ch in (title or "").strip():
+            if ch in "เแโใไ" or not ch.isalnum():
+                continue
+            return ch.upper()
+        return "?"
 
     @staticmethod
     def _truncate(text: str, n: int) -> str:
@@ -1006,8 +1020,7 @@ class App(ctk.CTk):
 
         pill = ctk.CTkFrame(header, fg_color=C_SELECTED, corner_radius=22, height=44)
         pill.place(relx=0.5, rely=0.5, anchor="center")
-        self.header_avatar = ctk.CTkLabel(pill, text="", width=30, height=30, corner_radius=15,
-                                          fg_color=AVATAR_COLORS[0], text_color="white", font=self._font(13, "bold"))
+        self.header_avatar = self._avatar(pill, 30, AVATAR_COLORS[0], "", 13)
         self.header_avatar.pack(side="left", padx=(8, 8), pady=7)
         self.header_title = ctk.CTkLabel(pill, text="", text_color=C_TEXT, font=self._font(14, "bold"))
         self.header_title.pack(side="left", padx=(0, 16))
@@ -1100,8 +1113,8 @@ class App(ctk.CTk):
         conv = self.store.get(self.current_id) if self.current_id else {}
         title = conv.get("title") or "แชทใหม่"
         self.header_title.configure(text=self._truncate(title, 40))
-        self.header_avatar.configure(text=title.strip()[:1].upper() or "?",
-                                     fg_color=conv.get("avatarColor") or AVATAR_COLORS[0])
+        self.header_avatar.configure(fg_color=conv.get("avatarColor") or AVATAR_COLORS[0])
+        self.header_avatar.label.configure(text=self._initial(title))
 
     def _open_settings_popup(self) -> None:
         SettingsDialog(self)
@@ -1286,8 +1299,8 @@ class App(ctk.CTk):
         frame.grid(row=self._msg_row, column=0, sticky="ew", padx=80, pady=10)
         frame.columnconfigure(0, weight=1)
         self._msg_row += 1
-        ctk.CTkLabel(frame, text=text, text_color=C_TEXT_DIM, font=self._font(12),
-                     wraplength=700, justify="left").grid(row=0, column=0, sticky="ew", padx=16, pady=10)
+        ctk.CTkLabel(frame, text=text.replace("**", ""), text_color=C_TEXT_DIM, font=self._font(12),
+                     wraplength=700, justify="left", anchor="w").grid(row=0, column=0, sticky="ew", padx=16, pady=10)
 
     def _add_tool_indicator(self, conv_id: str, tool_name: str, detail: str = "") -> None:
         if conv_id != self.current_id:
