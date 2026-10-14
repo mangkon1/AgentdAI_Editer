@@ -505,7 +505,10 @@ class SettingsDialog(ctk.CTkToplevel):
             self.workspace_var.set(folder)
 
     def _save_and_close(self) -> None:
-        key = self.api_key_var.get().strip()
+        key = "".join(self.api_key_var.get().split())
+        half = len(key) // 2
+        if len(key) % 2 == 0 and half and key[:half] == key[half:]:
+            key = key[:half]  # accidental double paste
         model = self.model_var.get().strip() or DEFAULT_MODELS[0]
         workspace = self.workspace_var.get().strip() or DEFAULT_WORKSPACE
 
@@ -531,7 +534,7 @@ class SettingsDialog(ctk.CTkToplevel):
         tools.set_workspace(workspace)
 
         # Reset chat session with updated credentials
-        self.parent_app.chat_sessions.clear()
+        self.parent_app._reset_genai_client()
 
         # Update parent topbar badges
         self.parent_app._update_topbar_badges()
@@ -575,6 +578,12 @@ class App(ctk.CTk):
         self.store.migrate_legacy(CHAT_HISTORY_FILE)
         self.current_id: str | None = None
         self.chat_sessions: dict[str, genai.chats.Chat] = {}
+        # Persistent Gemini client. NOTE: google-genai closes its httpx client when the
+        # genai.Client object is garbage-collected, and a Chat does NOT keep the Client alive,
+        # so the client must be held on the App for as long as any chat uses it.
+        self.genai_client: genai.Client | None = None
+        self._genai_client_key: tuple[str, str] | None = None
+        self._client_lock = threading.Lock()
         self.is_thinking = False
         self.thinking_conv: str | None = None
         self._ui_queue: queue.Queue = queue.Queue()   # thread → UI messages
@@ -649,6 +658,12 @@ class App(ctk.CTk):
         is_z = (code == 90) or (keysym == "z")
 
         if not (is_a or is_c or is_v or is_x or is_z):
+            return None
+
+        # On an English layout Tk's own class bindings (<<Copy>>/<<Paste>>/<<Cut>>/<<Undo>>)
+        # already handled the key BEFORE this bind_all handler runs, so handling it again
+        # would paste twice (this caused a doubled API key). Only act for non-Latin layouts (Thai).
+        if keysym in ("c", "v", "x", "z") and not is_a:
             return None
 
         widget = event.widget
@@ -1485,7 +1500,7 @@ class App(ctk.CTk):
                     parts=[genai_types.Part.from_text(text=content)],
                 ))
 
-        client = genai.Client(api_key=api_key)
+        client = self._get_genai_client(api_key, model_name)
         session = client.chats.create(
             model=model_name,
             history=history_contents if history_contents else None,
@@ -1500,13 +1515,60 @@ class App(ctk.CTk):
         logger.info("New chat session for %s (model: %s, history turns: %d)", conv_id, model_name, len(history_contents))
         return session
 
+    def _get_genai_client(self, api_key: str, model_name: str) -> genai.Client:
+        """Return the live shared client; rebuild it (and drop chats) when key/model changed."""
+        with self._client_lock:
+            key = (api_key, model_name)
+            if self.genai_client is None or self._genai_client_key != key:
+                if self.genai_client is not None:
+                    self.chat_sessions.clear()  # chats bound to the old client
+                self.genai_client = genai.Client(api_key=api_key)
+                self._genai_client_key = key
+                logger.info("Created Gemini client (model: %s)", model_name)
+            return self.genai_client
+
+    def _reset_genai_client(self) -> None:
+        with self._client_lock:
+            self.genai_client = None
+            self._genai_client_key = None
+            self.chat_sessions.clear()
+
+    @staticmethod
+    def _is_client_closed_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "client has been closed" in msg or "client is closed" in msg
+
+    def _send(self, conv_id: str, prior: list[dict], session_box: list, payload):
+        """send_message with one automatic rebuild + retry if the HTTP client was closed."""
+        try:
+            return session_box[0].send_message(payload)
+        except Exception as exc:
+            if not self._is_client_closed_error(exc):
+                raise
+            logger.warning("Gemini client was closed; rebuilding client and retrying once")
+            self._reset_genai_client()
+            if isinstance(payload, str):
+                session_box[0] = self._get_or_create_session(conv_id, prior)
+                return session_box[0].send_message(payload)
+            # Mid tool-loop: rebuild chat with the old chat's curated history
+            old_hist = session_box[0].get_history(curated=True) if hasattr(session_box[0], "get_history") else []
+            new_session = self._get_or_create_session(conv_id, [])
+            if old_hist:
+                api_key = self.config_data.get("api_key", "").strip()
+                model_name = self.config_data.get("model", DEFAULT_MODELS[0]).strip()
+                new_session = self._get_genai_client(api_key, model_name).chats.create(
+                    model=model_name, history=old_hist, config=new_session._config)
+                self.chat_sessions[conv_id] = new_session
+            session_box[0] = new_session
+            return new_session.send_message(payload)
+
     def _agent_thread(self, conv_id: str, user_message: str, prior: list[dict]) -> None:
         self._q("set_thinking", True, conv_id)
         self._q("status", "🤔 กำลังคิด...")
 
         try:
-            session = self._get_or_create_session(conv_id, prior)
-            response = session.send_message(user_message)
+            box = [self._get_or_create_session(conv_id, prior)]
+            response = self._send(conv_id, prior, box, user_message)
 
             while True:
                 fn_calls = []
@@ -1552,7 +1614,7 @@ class App(ctk.CTk):
                     )
 
                 self._q("status", "🤔 กำลังประมวลผลผลลัพธ์...")
-                response = session.send_message(function_responses)
+                response = self._send(conv_id, prior, box, function_responses)
 
             self._q("status", "✅ เสร็จสิ้น — พร้อมรับคำสั่งถัดไป")
 
